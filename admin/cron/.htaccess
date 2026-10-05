@@ -1,0 +1,18 @@
+# Cron klasörüne doğrudan erişimi engelle
+# Sadece test.php erişilebilir (auth kontrolü var)
+
+<Files "pazar-puantaj-olustur.php">
+    Order deny,allow
+    Deny from all
+</Files>
+
+<Files "*.log">
+    Order deny,allow
+    Deny from all
+</Files>
+
+# Logs klasörüne erişimi tamamen engelle
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule ^logs/ - [F,L]
+</IfModule>

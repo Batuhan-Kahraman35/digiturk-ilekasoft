@@ -1,0 +1,79 @@
+# Hassas Bilgiler ve Şifreler
+config/database.php
+config/mail.php
+config/sms.php
+config/whatsapp.php
+
+# Banka Bilgileri (Hassas)
+admin/Banka Bilgileri/
+
+# Veritabanı Dosyaları
+*.sql
+!config/versions.sql
+*.bak
+*.bak[0-9]*
+*.mdf
+*.ldf
+
+# Yedek arşivleri
+*.zip
+
+# Log Dosyaları
+logs/
+*.log
+
+# Calisma Zamani Verisi (VoIP oturum cookie'leri vb.)
+storage/
+temp/
+tmp/
+App_Data/
+
+# Editör geçmişi (eski config sürümleri/şifre içerebilir) ve yerel araçlar
+.lh/
+.history/
+.claude/
+
+# GitHub iki repo akışı: public temiz kopya
+.public/
+
+# Upload Klasörleri
+assets/uploads/
+admin/assets/uploads/
+admin/uploads/
+
+# AdminLTE - Tüm klasör ignore edildi (kaynak kod)
+admin/AdminLTE-4.0.0-rc4/
+
+# IDE ve Editor Dosyaları
+.vscode/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Windows
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Geçici Dosyalar
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# Composer
+vendor/
+composer.lock
+
+# NPM
+node_modules/
+package-lock.json
+yarn.lock
+
+# Environment
+.env
+.env.local
+.env.*.local
