@@ -130,6 +130,7 @@ function kbiFiltreWhere(array $post): array {
     $esit = [
         'f_bayi'       => 'r.IrisRapor_MemoYonlenenBayiKodu',
         'f_bolge'      => 'r.IrisRapor_MemoYonlenenBayiBolge',
+        'f_yonetici'   => 'r.IrisRapor_MemoYonlenenBayiYoneticisi',
         'f_talep_turu' => 'r.IrisRapor_TalepTuru',
         'f_satis'      => 'r.IrisRapor_SatisDurumu',
         'f_surec'      => 'r.IrisRapor_BasvuruSurecDurumu',
@@ -155,6 +156,8 @@ function kbiFiltreWhere(array $post): array {
         'f_tarih_bit'   => ['r.IrisRapor_TalepGirisTarihi',  '<=', ' 23:59:59'],
         'f_kapanis_bas' => ['r.IrisRapor_MemoKapanisTarihi', '>=', ' 00:00:00'],
         'f_kapanis_bit' => ['r.IrisRapor_MemoKapanisTarihi', '<=', ' 23:59:59'],
+        'f_randevu_bas' => ['r.IrisRapor_RandevuTarihi',     '>=', ' 00:00:00'],
+        'f_randevu_bit' => ['r.IrisRapor_RandevuTarihi',     '<=', ' 23:59:59'],
     ];
     foreach ($tarihler as $alan => [$kolon, $op, $saat]) {
         $v = trim((string)($post[$alan] ?? ''));
@@ -176,6 +179,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'excel
                 r.IrisRapor_MemoYonlenenBayiKodu  AS BayiKodu,
                 r.IrisRapor_MemoYonlenenBayiAdi   AS BayiAdi,
                 r.IrisRapor_MemoYonlenenBayiBolge AS Bolge,
+                r.IrisRapor_MemoYonlenenBayiYoneticisi AS Yonetici,
                 r.IrisRapor_DtMusteriNo           AS MusteriNo,
                 r.IrisRapor_TalepId               AS TalepId,
                 r.IrisRapor_MemoId                AS MemoId,
@@ -194,7 +198,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'excel
     }
 
     $basliklar = [
-        'BayiKodu' => 'Kurulum Bayi Kodu', 'BayiAdi' => 'Kurulum Bayisi', 'Bolge' => 'Bölge',
+        'BayiKodu' => 'Kurulum Bayi Kodu', 'BayiAdi' => 'Kurulum Bayisi', 'Bolge' => 'Bölge', 'Yonetici' => 'Bayi Yöneticisi',
         'MusteriNo' => 'Müşteri No', 'TalepId' => 'Talep No', 'MemoId' => 'Memo No', 'TalepGiris' => 'Talep Giriş',
         'GirenPersonel' => 'Giren Personel', 'GirenBayiKodu' => 'Giren Bayi Kodu', 'SatisDurumu' => 'Satış Durumu',
         'SurecDurumu' => 'Süreç (IRIS)', 'MemoSonDurum' => 'Memo Son Durum', 'MemoSonCevap' => 'Memo Son Cevap',
@@ -263,16 +267,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $orderMap = [
                     0 => 'r.IrisRapor_MemoYonlenenBayiAdi',
                     1 => 'r.IrisRapor_MemoYonlenenBayiBolge',
-                    2 => 'r.IrisRapor_DtMusteriNo',
-                    3 => 'r.IrisRapor_TalepGirisTarihi',
-                    4 => 'r.IrisRapor_TalebiGirenPersonel',
-                    5 => 'r.IrisRapor_SatisDurumu',
-                    6 => 'r.IrisRapor_BasvuruSurecDurumu',
-                    7 => 'r.IrisRapor_MemoSonDurum',
-                    8 => 'r.IrisRapor_RandevuTarihi',
-                    9 => 'r.IrisRapor_MemoKapanisTarihi',
+                    2 => 'r.IrisRapor_MemoYonlenenBayiYoneticisi',
+                    3 => 'r.IrisRapor_DtMusteriNo',
+                    4 => 'r.IrisRapor_TalepGirisTarihi',
+                    5 => 'r.IrisRapor_TalebiGirenPersonel',
+                    6 => 'r.IrisRapor_SatisDurumu',
+                    7 => 'r.IrisRapor_BasvuruSurecDurumu',
+                    8 => 'r.IrisRapor_MemoSonDurum',
+                    9 => 'r.IrisRapor_RandevuTarihi',
+                    10 => 'r.IrisRapor_MemoKapanisTarihi',
                 ];
-                $orderIdx = (int)($_POST['order'][0]['column'] ?? 3);
+                $orderIdx = (int)($_POST['order'][0]['column'] ?? 4);
                 $orderBy  = $orderMap[$orderIdx] ?? 'r.IrisRapor_TalepGirisTarihi';
                 $orderDir = strtolower($_POST['order'][0]['dir'] ?? 'desc') === 'asc' ? 'ASC' : 'DESC';
 
@@ -293,6 +298,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             r.IrisRapor_MemoYonlenenBayiKodu  AS BayiKodu,
                             r.IrisRapor_MemoYonlenenBayiAdi   AS BayiAdi,
                             r.IrisRapor_MemoYonlenenBayiBolge AS Bolge,
+                            r.IrisRapor_MemoYonlenenBayiYoneticisi AS Yonetici,
                             r.IrisRapor_TalepId               AS TalepId,
                             r.IrisRapor_MemoId                AS MemoId,
                             r.IrisRapor_DtMusteriNo           AS MusteriNo,
@@ -373,7 +379,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             // Filtre dropdown seçenekleri: sayfa render'ını yavaşlatmasın diye ayrı ve bir kez çekilir.
             // Yalnız tabloda gerçekten geçen değerler listelenir (yetki kısıtı dahil).
             case 'secenekler': {
-                $bos = ['bayi' => [], 'bolge' => [], 'talep_turu' => [], 'satis' => [], 'surec' => [],
+                $bos = ['bayi' => [], 'bolge' => [], 'yonetici' => [],'talep_turu' => [], 'satis' => [], 'surec' => [],
                         'memo_durum' => [], 'giren_bayi' => [], 'personel' => []];
                 if ($temel === null) { echo json_encode(['success' => true, 'data' => $bos]); break; }
                 [$whereBase, $paramsBase] = $temel;
@@ -397,6 +403,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 echo json_encode(['success' => true, 'data' => [
                     'bayi'       => $kodAd('r.IrisRapor_MemoYonlenenBayiKodu', 'r.IrisRapor_MemoYonlenenBayiAdi'),
                     'bolge'      => $distinct('r.IrisRapor_MemoYonlenenBayiBolge'),
+                    'yonetici'   => $distinct('r.IrisRapor_MemoYonlenenBayiYoneticisi'),
                     'talep_turu' => $distinct('r.IrisRapor_TalepTuru'),
                     'satis'      => $distinct('r.IrisRapor_SatisDurumu'),
                     'surec'      => $distinct('r.IrisRapor_BasvuruSurecDurumu'),
@@ -542,6 +549,10 @@ $varsayilanBit = date('Y-m-d');
                                     <select class="form-select" id="filter_bolge" data-secenek="bolge"><option value="">Tümü</option></select>
                                 </div>
                                 <div class="col-md-3">
+                                    <label class="form-label">Bayi Yöneticisi</label>
+                                    <select class="form-select" id="filter_yonetici" data-secenek="yonetici"><option value="">Tümü</option></select>
+                                </div>
+                                <div class="col-md-3">
                                     <label class="form-label">Memo</label>
                                     <select class="form-select" id="filter_memo_acik">
                                         <option value="">Tümü</option>
@@ -588,6 +599,14 @@ $varsayilanBit = date('Y-m-d');
                                 <div class="col-md-3">
                                     <label class="form-label">Memo Kapanış (Bitiş)</label>
                                     <input type="date" class="form-control" id="filter_kapanis_bit">
+                                </div>
+                                <div class="col-md-3">
+                                    <label class="form-label">Randevu (Başlangıç)</label>
+                                    <input type="date" class="form-control" id="filter_randevu_bas">
+                                </div>
+                                <div class="col-md-3">
+                                    <label class="form-label">Randevu (Bitiş)</label>
+                                    <input type="date" class="form-control" id="filter_randevu_bit">
                                 </div>
                                 <div class="col-md-12">
                                     <button type="submit" class="btn btn-primary"><i class="bi bi-search"></i> Filtrele</button>
@@ -640,6 +659,7 @@ $varsayilanBit = date('Y-m-d');
                                         <tr>
                                             <th>Kurulum Bayisi</th>
                                             <th>Bölge</th>
+                                            <th>Bayi Yöneticisi</th>
                                             <th>Müşteri No</th>
                                             <th>Talep Giriş</th>
                                             <th>Giren Personel</th>
@@ -685,6 +705,7 @@ $varsayilanBit = date('Y-m-d');
             f_search:      $('#filter_search').val() || '',
             f_bayi:        $('#filter_bayi').val() || '',
             f_bolge:       $('#filter_bolge').val() || '',
+            f_yonetici:    $('#filter_yonetici').val() || '',
             f_memo_acik:   $('#filter_memo_acik').val() || '',
             f_talep_turu:  $('#filter_talep_turu').val() || '',
             f_satis:       $('#filter_satis').val() || '',
@@ -695,7 +716,9 @@ $varsayilanBit = date('Y-m-d');
             f_tarih_bas:   $('#filter_tarih_bas').val() || '',
             f_tarih_bit:   $('#filter_tarih_bit').val() || '',
             f_kapanis_bas: $('#filter_kapanis_bas').val() || '',
-            f_kapanis_bit: $('#filter_kapanis_bit').val() || ''
+            f_kapanis_bit: $('#filter_kapanis_bit').val() || '',
+            f_randevu_bas: $('#filter_randevu_bas').val() || '',
+            f_randevu_bit: $('#filter_randevu_bit').val() || ''
         };
     }
 
@@ -707,7 +730,7 @@ $varsayilanBit = date('Y-m-d');
             autoWidth: false,
             scrollX: true,
             dom: 'lrtip', // global arama kapalı — filtre panelindeki "Ara" kullanılır
-            order: [[3, 'desc']],
+            order: [[4, 'desc']],
             pageLength: 25,
             lengthMenu: [[10, 25, 50, 100], [10, 25, 50, 100]],
             ajax: {
@@ -718,6 +741,7 @@ $varsayilanBit = date('Y-m-d');
             columns: [
                 { data: null,          render: (d, t, r) => `<strong>${escapeHtml(r.BayiAdi || '-')}</strong><br><small class="text-muted mono">${escapeHtml(r.BayiKodu || '')}</small>` },
                 { data: 'Bolge',       render: d => escapeHtml(d || '-') },
+                { data: 'Yonetici',    render: d => escapeHtml(d || '-') },
                 { data: 'MusteriNo',   render: d => d ? `<span class="mono">${escapeHtml(d)}</span>` : '<span class="text-muted">-</span>' },
                 { data: 'TalepGiris',  render: d => escapeHtml(d || '-') },
                 { data: null,          render: (d, t, r) => escapeHtml(r.GirenPersonel || '-') + (r.GirenBayiKodu ? `<br><small class="text-muted">${escapeHtml(r.GirenBayiKodu)}</small>` : '') },
@@ -766,7 +790,7 @@ $varsayilanBit = date('Y-m-d');
 
         $('#clearFilters').on('click', function () {
             $('#filterForm')[0].reset();
-            $('#filter_tarih_bas, #filter_tarih_bit, #filter_kapanis_bas, #filter_kapanis_bit').val('');
+            $('#filter_tarih_bas, #filter_tarih_bit, #filter_kapanis_bas, #filter_kapanis_bit, #filter_randevu_bas, #filter_randevu_bit').val('');
             $('#filterForm select').val('').trigger('change');
             yenile();
             showToast('Filtreler temizlendi (tüm tarihler)', 'info');

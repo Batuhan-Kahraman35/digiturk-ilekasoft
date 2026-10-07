@@ -3941,6 +3941,255 @@ function gorevIrisTalepEslestir(array $params, $db): array
 }
 
 /**
+ * Kütüphanesiz, tek sayfalık .xlsx üretir (ZipArchive). Telefonda ve WhatsApp
+ * önizlemesinde açılabilsin diye HTML tabanlı .xls yerine gerçek OOXML yazılır.
+ *
+ * @param array  $basliklar ['anahtar' => 'Başlık', ...] — sütun sırası da bu
+ * @param array  $satirlar  Her satır anahtar => değer; tüm değerler metin olarak yazılır
+ *                          (numaralarda başta sıfır / bilimsel gösterim sorunu olmasın)
+ * @param array  $genislik  ['anahtar' => karakter genişliği] (opsiyonel)
+ * @return string Ham .xlsx içeriği
+ */
+function xlsxOlustur(array $basliklar, array $satirlar, array $genislik = [], string $sayfaAdi = 'Liste'): string
+{
+    $kol = function (int $i): string {
+        $s = '';
+        for ($i++; $i > 0; $i = intdiv($i - 1, 26)) $s = chr(65 + ($i - 1) % 26) . $s;
+        return $s;
+    };
+    $x = fn($v) => htmlspecialchars((string)$v, ENT_XML1 | ENT_QUOTES, 'UTF-8');
+    $anahtarlar = array_keys($basliklar);
+    $sonKol     = $kol(count($anahtarlar) - 1);
+    $sonSatir   = count($satirlar) + 1;
+
+    $hucre = fn(string $ref, $v, int $stil) =>
+        "<c r=\"{$ref}\" t=\"inlineStr\" s=\"{$stil}\"><is><t xml:space=\"preserve\">{$x($v)}</t></is></c>";
+
+    $xml = '';
+    $r = '';
+    foreach ($anahtarlar as $i => $k) $r .= $hucre($kol($i) . '1', $basliklar[$k], 1);
+    $xml .= "<row r=\"1\">{$r}</row>";
+    foreach (array_values($satirlar) as $n => $satir) {
+        $no = $n + 2; $r = '';
+        foreach ($anahtarlar as $i => $k) {
+            $v = $satir[$k] ?? '';
+            if ($v === null || $v === '') continue;
+            $r .= $hucre($kol($i) . $no, $v, 0);
+        }
+        $xml .= "<row r=\"{$no}\">{$r}</row>";
+    }
+
+    $cols = '';
+    foreach ($anahtarlar as $i => $k) {
+        $w = $genislik[$k] ?? max(10, mb_strlen($basliklar[$k]) + 2);
+        $cols .= '<col min="' . ($i + 1) . '" max="' . ($i + 1) . "\" width=\"{$w}\" customWidth=\"1\"/>";
+    }
+
+    $sheet = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        . '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        . '<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>'
+        . "<cols>{$cols}</cols><sheetData>{$xml}</sheetData>"
+        . "<autoFilter ref=\"A1:{$sonKol}{$sonSatir}\"/>"
+        . '</worksheet>';
+
+    $sayfaAdi = $x(mb_substr(preg_replace('/[\\\\\/?*\[\]:]/', '', $sayfaAdi), 0, 31) ?: 'Liste');
+    $dosyalar = [
+        '[Content_Types].xml' => '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            . '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            . '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            . '<Default Extension="xml" ContentType="application/xml"/>'
+            . '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+            . '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+            . '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+            . '</Types>',
+        '_rels/.rels' => '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            . '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            . '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+            . '</Relationships>',
+        'xl/workbook.xml' => '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            . '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+            . "<sheets><sheet name=\"{$sayfaAdi}\" sheetId=\"1\" r:id=\"rId1\"/></sheets>"
+            . '<definedNames><definedName name="_xlnm._FilterDatabase" localSheetId="0" hidden="1">'
+            . "'{$sayfaAdi}'!\$A\$1:\${$sonKol}\${$sonSatir}</definedName></definedNames>"
+            . '</workbook>',
+        'xl/_rels/workbook.xml.rels' => '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            . '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            . '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
+            . '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
+            . '</Relationships>',
+        // Stil 0: normal · Stil 1: başlık (kalın, beyaz yazı, mavi zemin — sayfadaki Excel ile aynı renk)
+        'xl/styles.xml' => '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            . '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            . '<fonts count="2"><font><sz val="11"/><name val="Calibri"/></font>'
+            . '<font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font></fonts>'
+            . '<fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill>'
+            . '<fill><patternFill patternType="solid"><fgColor rgb="FF0D6EFD"/><bgColor indexed="64"/></patternFill></fill></fills>'
+            . '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>'
+            . '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+            . '<cellXfs count="2"><xf numFmtId="49" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>'
+            . '<xf numFmtId="49" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1" applyNumberFormat="1"/></cellXfs>'
+            . '</styleSheet>',
+        'xl/worksheets/sheet1.xml' => $sheet,
+    ];
+
+    $tmp = tempnam(sys_get_temp_dir(), 'xlsx');
+    $zip = new ZipArchive();
+    if ($zip->open($tmp, ZipArchive::OVERWRITE) !== true) throw new RuntimeException('xlsx oluşturulamadı (ZipArchive).');
+    foreach ($dosyalar as $ad => $icerik) $zip->addFromString($ad, $icerik);
+    $zip->close();
+    $veri = file_get_contents($tmp);
+    @unlink($tmp);
+    return $veri;
+}
+
+/**
+ * Kurulum bayilerine yönlendirilen işlerin randevularını WhatsApp ile bildirir.
+ * Her zamanlayıcı ayrı bir bildirimdir (bayi seti + alıcılar + gün aralığı).
+ * Liste .xlsx ek olarak gider; belge altı yazısında kısa özet bulunur.
+ *
+ * Parametreler:
+ *   bayi_kodlari    : Kurulum bayi kodları, virgüllü (IrisRapor_MemoYonlenenBayiKodu);
+ *                     "*" = tüm kurulum bayileri (sonradan gelenler dahil)
+ *   alicilar        : Telefon (905xx) ve/veya grup JID (120363...@g.us), virgüllü
+ *   randevu_gunleri : Göreli gün aralığı "bas-bit" (0 = bugün). Örn: "1-1" yarın, "0-6" 7 gün
+ *   bos_gonder      : "1" ise randevu yokken de bilgi mesajı (düz metin) gider
+ * Kapanmış memolar da listelenir ("Durum" sütununda Kapandı).
+ */
+function gorevKurulumBayiRandevuBildir(array $params, $db): array
+{
+    ob_start();
+    $sonuc = ''; $durum = 1;
+
+    try {
+        require_once __DIR__ . '/../admin/includes/EntegrasyonHelper.php';
+
+        $bayiKodlari = array_values(array_unique(array_filter(array_map('trim', explode(',', $params['bayi_kodlari'] ?? '')))));
+        $alicilar    = array_values(array_unique(array_filter(array_map('trim', explode(',', $params['alicilar'] ?? '')))));
+        if (!$bayiKodlari) return ['durum' => 2, 'sonuc' => 'Kurulum bayisi seçilmemiş.', 'cikti' => ob_get_clean()];
+        if (!$alicilar)    return ['durum' => 2, 'sonuc' => 'Alıcı listesi boş.',          'cikti' => ob_get_clean()];
+
+        // Gün aralığı: "1-1", "0-6"... Tek sayı da kabul edilir ("1" = yarın)
+        $gunParam = trim((string)($params['randevu_gunleri'] ?? '1-1'));
+        if (!preg_match('/^(\d{1,2})(?:-(\d{1,2}))?$/', $gunParam, $m)) {
+            return ['durum' => 2, 'sonuc' => "Geçersiz randevu günü: '{$gunParam}'", 'cikti' => ob_get_clean()];
+        }
+        $gunBas = (int)$m[1];
+        $gunBit = max($gunBas, (int)($m[2] ?? $m[1]));
+        $bas    = date('Y-m-d', strtotime("+{$gunBas} day"));
+        $bit    = date('Y-m-d', strtotime("+{$gunBit} day"));
+
+        $gunAdlari = [0 => 'Bugün', 1 => 'Yarın', 2 => 'Öbür gün'];
+        $basGoster = date('d.m.Y', strtotime($bas));
+        $baslik    = $bas === $bit
+            ? $basGoster . (isset($gunAdlari[$gunBas]) ? " ({$gunAdlari[$gunBas]})" : '')
+            : $basGoster . ' - ' . date('d.m.Y', strtotime($bit));
+        echo "  Randevu aralığı: {$baslik}\n";
+        // "*" = tüm kurulum bayileri (çalıştığı anda rapordaki herkes; yeni gelenler dahil)
+        $tumBayiler = in_array('*', $bayiKodlari, true);
+        echo '  Bayiler: ' . ($tumBayiler ? 'Tümü (yeniler dahil)' : implode(', ', $bayiKodlari)) . "\n";
+
+        if ($tumBayiler) {
+            $bayiKosul  = 'r.IrisRapor_MemoYonlenenBayiKodu IS NOT NULL';
+            $bayiParams = [];
+        } else {
+            $bayiKosul  = 'r.IrisRapor_MemoYonlenenBayiKodu IN (' . implode(',', array_fill(0, count($bayiKodlari), '?')) . ')';
+            $bayiParams = $bayiKodlari;
+        }
+        $rows = $db->fetchAll("
+            SELECT r.IrisRapor_MemoYonlenenBayiKodu         AS BayiKodu,
+                   r.IrisRapor_MemoYonlenenBayiAdi          AS BayiAdi,
+                   r.IrisRapor_MemoYonlenenBayiYoneticisi   AS Yonetici,
+                   r.IrisRapor_MemoYonlenenBayiBolge        AS Bolge,
+                   r.IrisRapor_DtMusteriNo                  AS MusteriNo,
+                   r.IrisRapor_TalepId                      AS TalepId,
+                   r.IrisRapor_MemoId                       AS MemoId,
+                   r.IrisRapor_MemoKayitTipi                AS Tip,
+                   r.IrisRapor_TalepTuru                    AS TalepTuru,
+                   r.IrisRapor_SatisDurumu                  AS SatisDurumu,
+                   r.IrisRapor_RandevuTarihi                AS Randevu,
+                   r.IrisRapor_MemoKapanisTarihi            AS Kapanis
+            FROM DigiturkIrisRapor r
+            WHERE $bayiKosul
+              AND r.IrisRapor_RandevuTarihi >= ?
+              AND r.IrisRapor_RandevuTarihi <  DATEADD(DAY, 1, CAST(? AS DATE))
+            ORDER BY r.IrisRapor_MemoYonlenenBayiAdi, r.IrisRapor_RandevuTarihi, r.IrisRapor_Id",
+            array_merge($bayiParams, [$bas . ' 00:00:00', $bit]));
+        echo '  Bulunan randevu: ' . count($rows) . "\n";
+
+        if (!$rows && ($params['bos_gonder'] ?? '0') !== '1') {
+            return ['durum' => 1, 'sonuc' => "{$baslik}: randevu yok, gönderim yapılmadı.", 'cikti' => ob_get_clean()];
+        }
+
+        $ust = "📅 *Kurulum Randevuları — {$baslik}*";
+
+        $basarili = $hatali = 0;
+        if (!$rows) {
+            // Boş Excel göndermek yerine kısa bilgi mesajı
+            $mesaj = $ust . "\n\nSeçili bayilerde bu aralıkta randevu yok.";
+            foreach ($alicilar as $alici) {
+                $r = EntegrasyonHelper::whatsappGonder(1, $alici, $mesaj);
+                if ($r['success']) { $basarili++; echo "  ✓ {$alici}: bilgi mesajı gönderildi\n"; }
+                else               { $hatali++;   echo "  ✗ {$alici}: {$r['message']}\n"; }
+            }
+        } else {
+            $basliklar = [
+                'BayiKodu' => 'Kurulum Bayi Kodu', 'BayiAdi' => 'Kurulum Bayisi', 'Yonetici' => 'Bayi Yöneticisi',
+                'Bolge' => 'Bölge', 'RandevuTarih' => 'Randevu Tarihi', 'RandevuSaat' => 'Randevu Saati',
+                'MusteriNo' => 'Müşteri No', 'TalepId' => 'Talep No', 'MemoId' => 'Memo No', 'Tip' => 'Tip',
+                'TalepTuru' => 'Talep Türü', 'SatisDurumu' => 'Satış Durumu', 'Durum' => 'Durum',
+                'Kapanis' => 'Memo Kapanış',
+            ];
+            $genislik = [
+                'BayiKodu' => 14, 'BayiAdi' => 34, 'Yonetici' => 24, 'Bolge' => 14, 'RandevuTarih' => 13,
+                'RandevuSaat' => 12, 'MusteriNo' => 13, 'TalepId' => 12, 'MemoId' => 12, 'Tip' => 8,
+                'TalepTuru' => 16, 'SatisDurumu' => 16, 'Durum' => 10, 'Kapanis' => 17,
+            ];
+
+            $satirlar = [];
+            $acik = 0;
+            $bayiSay = [];
+            foreach ($rows as $r) {
+                $ts = strtotime($r['Randevu']);
+                if (!$r['Kapanis']) $acik++;
+                $bayiSay[$r['BayiKodu']] = true;
+                $satirlar[] = array_merge($r, [
+                    'RandevuTarih' => date('d.m.Y', $ts),
+                    'RandevuSaat'  => date('H:i', $ts),
+                    'Durum'        => $r['Kapanis'] ? 'Kapandı' : 'Açık',
+                    'Kapanis'      => $r['Kapanis'] ? date('d.m.Y H:i', strtotime($r['Kapanis'])) : '',
+                ]);
+            }
+
+            $xlsx     = xlsxOlustur($basliklar, $satirlar, $genislik, 'Randevular');
+            $base64   = base64_encode($xlsx);
+            $dosyaAdi = 'kurulum_randevulari_' . date('d.m.Y', strtotime($bas))
+                      . ($bas !== $bit ? '-' . date('d.m.Y', strtotime($bit)) : '') . '.xlsx';
+            $toplam   = count($rows);
+            $caption  = $ust . "\n"
+                      . "Toplam: *{$toplam}* randevu · " . count($bayiSay) . " bayi\n"
+                      . "Açık: {$acik} · Kapandı: " . ($toplam - $acik);
+            echo '  Excel: ' . $dosyaAdi . ' (' . strlen($xlsx) . " bayt)\n";
+
+            $mime = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+            foreach ($alicilar as $alici) {
+                $r = EntegrasyonHelper::whatsappBelgeGonder(1, $alici, $base64, $dosyaAdi, $mime, $caption);
+                if ($r['success']) { $basarili++; echo "  ✓ {$alici}: Excel gönderildi\n"; }
+                else               { $hatali++;   echo "  ✗ {$alici}: {$r['message']}\n"; }
+            }
+        }
+
+        $sonuc = "{$baslik}: " . count($rows) . " randevu, {$basarili} alıcıya gönderildi" . ($hatali ? ", {$hatali} hata" : '') . '.';
+        $durum = ($hatali > 0 && $basarili === 0) ? 2 : 1;
+
+    } catch (Throwable $e) {
+        $sonuc = get_class($e) . ': ' . $e->getMessage();
+        $durum = 2;
+    }
+
+    return ['durum' => $durum, 'sonuc' => $sonuc, 'cikti' => ob_get_clean()];
+}
+
+/**
  * Birleşik VoIP görevi: islem parametresine göre hesap / harcama / bakiye işlemini çalıştırır.
  * Her işlem ayrı zamanlayıcıyla (SabitParametreler.islem) tetiklenir.
  */
@@ -3976,6 +4225,7 @@ function gorevCalistir(string $gorevKodu, array $params, $db): array
         'whatsapp_baglanti_kontrol' => gorevWhatsappBaglantiKontrol($params, $db),
         'banka_hareket_sync'        => gorevBankaHareketSync($params, $db),
         'fikstur_kazi'              => gorevFiksturKazi($params, $db),
+        'kurulum_bayi_randevu_bildir' => gorevKurulumBayiRandevuBildir($params, $db),
         default                     => throw new RuntimeException("Bilinmeyen görev kodu: {$gorevKodu}"),
     };
 }

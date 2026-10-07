@@ -79,6 +79,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             exit;
         }
 
+        // ── Kurulum bayileri (tip:"kurulumbayi" çoklu seçim) ───────────────
+        // IRIS raporunda geçen yönlendirilen bayiler; modal ilk açıldığında bir kez çekilir.
+        if ($action === 'kurulum_bayileri') {
+            $bayiler = $db->fetchAll("
+                SELECT IrisRapor_MemoYonlenenBayiKodu AS kod, MAX(IrisRapor_MemoYonlenenBayiAdi) AS ad
+                FROM DigiturkIrisRapor
+                WHERE IrisRapor_MemoYonlenenBayiKodu IS NOT NULL
+                GROUP BY IrisRapor_MemoYonlenenBayiKodu
+                ORDER BY MAX(IrisRapor_MemoYonlenenBayiAdi)");
+            echo json_encode(['success' => true, 'data' => $bayiler], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+
         // ── Zamanlayıcı ekle ───────────────────────────────────────────────
         if ($action === 'zamanlama_ekle') {
             if (!$pagePermissions['can_add']) throw new Exception('Ekleme yetkiniz yok.');
@@ -255,6 +268,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         .z-table th { white-space: nowrap; font-size:.82rem; }
         .z-table td { font-size:.82rem; vertical-align:middle; }
         .runner-url { font-size:.78rem; word-break:break-all; }
+        /* Çoklu seçim (ör. tüm kurulum bayileri) modalı uzatmasın */
+        .modal .select2-container--bootstrap-5 .select2-selection--multiple { max-height: 160px; overflow-y: auto; }
     </style>
 </head>
 <body class="layout-fixed sidebar-expand-lg sidebar-open bg-body-tertiary">
@@ -411,6 +426,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             <option value="0 6 * * *">Her gün 06:00</option>
                             <option value="0 7 * * *">Her gün 07:00</option>
                             <option value="0 8 * * *">Her gün 08:00</option>
+                            <option value="0 10 * * *">Her gün 10:00</option>
+                            <option value="0 11 * * *">Her gün 11:00</option>
                             <option value="0 23 * * *">Her gece 23:00</option>
                             <option value="0 8 * * 1">Her Pazartesi 08:00</option>
                             <option value="0 8 1 * *">Her ayın 1'i 08:00</option>
@@ -544,6 +561,9 @@ const ANA_BAYILER = <?= json_encode($db->fetchAll("
     FROM DigiturkAnaBayiler
     ORDER BY Durum DESC, DigiturkAnaBayiler_Ad"), JSON_UNESCAPED_UNICODE) ?>;
 const SECIMLI_TIPLER = ['birim', 'personel', 'anabayi', 'secim'];
+// Çoklu seçimli tipler: değer virgülle birleştirilmiş metin olarak saklanır
+const COKLU_TIPLER   = ['kurulumbayi'];
+let KURULUM_BAYILERI = null; // tip:"kurulumbayi" — ilk ihtiyaçta AJAX ile çekilir
 const canEdit  = <?= json_encode((bool)$pagePermissions['can_edit']) ?>;
 const canAdd   = <?= json_encode((bool)$pagePermissions['can_add']) ?>;
 const canDel   = <?= json_encode((bool)$pagePermissions['can_delete']) ?>;
@@ -714,7 +734,14 @@ function renderZamanlamaParams(schema, values) {
     const $alan = $('#z_params_alan').empty();
     schema.forEach(function (p) {
         const val = values[p.ad] || '';
-        if (SECIMLI_TIPLER.includes(p.tip)) {
+        if (COKLU_TIPLER.includes(p.tip)) {
+            $alan.append(`
+            <div class="mb-2">
+                <label class="form-label mb-1">${esc(p.etiket)} ${p.zorunlu ? '<span class="text-danger">*</span>' : ''}</label>
+                <select class="form-select form-select-sm" id="zp_${p.ad}" multiple></select>
+            </div>`);
+            cokluSecimKur('#zp_' + p.ad, '#zamanlamaModal', val);
+        } else if (SECIMLI_TIPLER.includes(p.tip)) {
             const opts = secimOptions(p.tip, val, p);
             $alan.append(`
             <div class="mb-2">
@@ -781,11 +808,67 @@ function secimOptions(tip, selected, p) {
     return personelOptions(selected);
 }
 
+// "*" = tüm kurulum bayileri; görev çalıştığı anda rapordaki bütün bayileri alır (yeni gelenler dahil)
+const TUM_BAYILER = '*';
+const TUM_BAYILER_ETIKET = '★ Tüm bayiler (yeniler dahil)';
+
+// Form alanının değeri; çoklu seçimde dizi virgülle birleştirilir. "*" seçiliyse yalnız "*" döner.
+function paramDeger(selId) {
+    const v = $(selId).val();
+    if (Array.isArray(v) && v.includes(TUM_BAYILER)) return TUM_BAYILER;
+    return (Array.isArray(v) ? v.join(',') : (v || '')).trim();
+}
+
+// tip:"kurulumbayi" — kayıtlı kodlar hemen seçili gösterilir, liste gelince adlarıyla doldurulur
+function cokluSecimKur(selId, modalId, kayitli) {
+    const secili = String(kayitli || '').split(',').map(s => s.trim()).filter(Boolean);
+    const $sel   = $(selId);
+    secili.forEach(k => $sel.append(new Option(k === TUM_BAYILER ? TUM_BAYILER_ETIKET : k, k, true, true)));
+    modalSelect2(selId, modalId);
+
+    // "*" diğer seçimlerle birlikte durmaz: "*" seçilince tek kalır, başka bayi seçilince "*" kalkar
+    $sel.on('select2:select', function (e) {
+        const v = e.params.data.id;
+        $sel.val(v === TUM_BAYILER ? [TUM_BAYILER] : ($sel.val() || []).filter(x => x !== TUM_BAYILER)).trigger('change');
+    });
+
+    // Tüm bayiler / tümünü seç / temizle
+    const $btn = $(`
+        <div class="mt-1">
+            <button type="button" class="btn btn-link btn-sm p-0 me-3 fw-semibold"><i class="bi bi-infinity"></i> Tüm bayiler (yeniler dahil)</button>
+            <button type="button" class="btn btn-link btn-sm p-0 me-3"><i class="bi bi-check2-all"></i> Listedekilerin tümünü seç</button>
+            <button type="button" class="btn btn-link btn-sm p-0 text-danger"><i class="bi bi-x-lg"></i> Temizle</button>
+        </div>
+        <div class="form-text">"Tüm bayiler" seçilirse sonradan rapora düşen yeni kurulum bayileri de otomatik dahil olur.
+            "Listedekilerin tümünü seç" yalnız şu an listede olanları kaydeder.</div>`);
+    $btn.find('button').eq(0).on('click', () => $sel.val([TUM_BAYILER]).trigger('change'));
+    $btn.find('button').eq(1).on('click', () => $sel.val($sel.find('option').map((i, o) => o.value).get().filter(x => x !== TUM_BAYILER)).trigger('change'));
+    $btn.find('button').eq(2).on('click', () => $sel.val(null).trigger('change'));
+    $sel.parent().append($btn);
+
+    const doldur = function () {
+        $sel.empty();
+        $sel.append(new Option(TUM_BAYILER_ETIKET, TUM_BAYILER, false, secili.includes(TUM_BAYILER)));
+        const kodlar = KURULUM_BAYILERI.map(b => String(b.kod));
+        KURULUM_BAYILERI.forEach(b => $sel.append(new Option(`${b.ad || b.kod} (${b.kod})`, b.kod, false, secili.includes(String(b.kod)))));
+        // Rapordan düşmüş ama zamanlayıcıda kayıtlı kod kaybolmasın
+        secili.filter(k => k !== TUM_BAYILER && !kodlar.includes(k)).forEach(k => $sel.append(new Option(k + ' (raporda yok)', k, true, true)));
+        $sel.trigger('change.select2');
+    };
+    if (KURULUM_BAYILERI) { doldur(); return; }
+    $.post(PAGE_URL, { action: 'kurulum_bayileri' }, function (r) {
+        if (!r.success) { showToast(r.message || 'Kurulum bayileri alınamadı', 'error'); return; }
+        KURULUM_BAYILERI = r.data || [];
+        doldur();
+    }, 'json');
+}
+
 // Modal içi çift-init'e karşı destroy guard + dropdownParent (CLAUDE.md kuralı)
 function modalSelect2(selId, modalId) {
     const $sel = $(selId);
     if ($sel.hasClass('select2-hidden-accessible')) $sel.select2('destroy');
-    $sel.select2({ theme: 'bootstrap-5', width: '100%', dropdownParent: $(modalId) });
+    // Parent .modal-content: .modal kaydırılınca (uzun çoklu seçim) Select2 listeyi ekran dışına konumlandırıyordu
+    $sel.select2({ theme: 'bootstrap-5', width: '100%', dropdownParent: $(modalId).find('.modal-content') });
 }
 
 function cronSablonSec() {
@@ -809,7 +892,7 @@ function zamanlamaKaydet() {
     const g      = gorevler.find(x => x.CronGorevler_Id == gorevId);
     const params = JSON.parse((g?.CronGorevler_Parametreler) || '[]');
     const pObj   = {};
-    params.forEach(p => { const v = ($('#zp_' + p.ad).val() || '').trim(); if (v) pObj[p.ad] = v; });
+    params.forEach(p => { const v = paramDeger('#zp_' + p.ad); if (v) pObj[p.ad] = v; });
 
     const data = {
         action:       id ? 'zamanlama_guncelle' : 'zamanlama_ekle',
@@ -894,6 +977,15 @@ function renderTetikleParams(params, values) {
     }
     params.forEach(function (p) {
         const saved = values[p.ad] || '';
+        if (COKLU_TIPLER.includes(p.tip)) {
+            $alan.append(`
+            <div class="mb-3">
+                <label class="form-label">${esc(p.etiket)} ${p.zorunlu ? '<span class="text-danger">*</span>' : ''}</label>
+                <select class="form-select" id="tp_${p.ad}" multiple></select>
+            </div>`);
+            cokluSecimKur('#tp_' + p.ad, '#tetikleModal', saved);
+            return;
+        }
         if (SECIMLI_TIPLER.includes(p.tip)) {
             const opts = secimOptions(p.tip, saved, p);
             $alan.append(`
@@ -927,7 +1019,7 @@ function tetikleBaslat() {
     if (!zamanlamaId) {
         const params = JSON.parse(g.CronGorevler_Parametreler || '[]');
         for (const p of params) {
-            const val = ($('#tp_' + p.ad).val() || '').trim();
+            const val = paramDeger('#tp_' + p.ad);
             if ((p.zorunlu ?? false) && !val) { showToast(p.etiket + ' zorunludur.', 'warning'); return; }
             if (val) data[p.ad] = p.tip === 'tarih' && /^\d{4}-\d{2}-\d{2}$/.test(val) ? val.split('-').reverse().join('.') : val;
         }
