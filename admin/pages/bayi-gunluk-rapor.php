@@ -335,9 +335,6 @@ function genelToplam(array $satirlar): array {
         'neo'    => array_sum(array_column($satirlar, 'neo')),
         'uydu'   => array_sum(array_column($satirlar, 'uydu')),
         'toplam' => array_sum(array_column($satirlar, 'toplam')),
-        'genel'  => array_sum(array_column($satirlar, 'isp'))
-                  + array_sum(array_column($satirlar, 'neo'))
-                  + array_sum(array_column($satirlar, 'uydu')),
     ];
 }
 
@@ -468,12 +465,11 @@ $raporTarihi = $sonKayit['son_tarih']
                                         <th>NEO</th>
                                         <th>UYDU</th>
                                         <th>TV TOPLAM</th>
-                                        <th>TOPLAM</th>
                                     </tr>
                                 </thead>
                                 <tbody id="tbody-satis">
                                     <?php if (empty($satirSatis)): ?>
-                                        <tr><td colspan="6" class="rapor-bos">Bu tarihe ait satış verisi bulunamadı</td></tr>
+                                        <tr><td colspan="5" class="rapor-bos">Bu tarihe ait satış verisi bulunamadı</td></tr>
                                     <?php else: ?>
                                         <?php foreach ($satirSatis as $s): ?>
                                         <tr>
@@ -482,7 +478,6 @@ $raporTarihi = $sonKayit['son_tarih']
                                             <td><?= $s['neo'] ?></td>
                                             <td><?= $s['uydu'] ?></td>
                                             <td><strong><?= $s['toplam'] ?></strong></td>
-                                            <td><strong><?= (int)$s['isp'] + (int)$s['neo'] + (int)$s['uydu'] ?></strong></td>
                                         </tr>
                                         <?php endforeach; ?>
                                         <tr class="toplam-satir">
@@ -491,7 +486,6 @@ $raporTarihi = $sonKayit['son_tarih']
                                             <td><?= $toplamSatis['neo'] ?></td>
                                             <td><?= $toplamSatis['uydu'] ?></td>
                                             <td><?= $toplamSatis['toplam'] ?></td>
-                                            <td><?= $toplamSatis['genel'] ?></td>
                                         </tr>
                                     <?php endif; ?>
                                 </tbody>
@@ -511,12 +505,11 @@ $raporTarihi = $sonKayit['son_tarih']
                                         <th>NEO</th>
                                         <th>UYDU</th>
                                         <th>TV TOPLAM</th>
-                                        <th>TOPLAM</th>
                                     </tr>
                                 </thead>
                                 <tbody id="tbody-kurulum">
                                     <?php if (empty($satirKurulum)): ?>
-                                        <tr><td colspan="6" class="rapor-bos">Bu tarihe ait kurulum verisi bulunamadı</td></tr>
+                                        <tr><td colspan="5" class="rapor-bos">Bu tarihe ait kurulum verisi bulunamadı</td></tr>
                                     <?php else: ?>
                                         <?php foreach ($satirKurulum as $s): ?>
                                         <tr>
@@ -525,7 +518,6 @@ $raporTarihi = $sonKayit['son_tarih']
                                             <td><?= $s['neo'] ?></td>
                                             <td><?= $s['uydu'] ?></td>
                                             <td><strong><?= $s['toplam'] ?></strong></td>
-                                            <td><strong><?= (int)$s['isp'] + (int)$s['neo'] + (int)$s['uydu'] ?></strong></td>
                                         </tr>
                                         <?php endforeach; ?>
                                         <tr class="toplam-satir">
@@ -534,7 +526,6 @@ $raporTarihi = $sonKayit['son_tarih']
                                             <td><?= $toplamKurulum['neo'] ?></td>
                                             <td><?= $toplamKurulum['uydu'] ?></td>
                                             <td><?= $toplamKurulum['toplam'] ?></td>
-                                            <td><?= $toplamKurulum['genel'] ?></td>
                                         </tr>
                                     <?php endif; ?>
                                 </tbody>
@@ -554,12 +545,11 @@ $raporTarihi = $sonKayit['son_tarih']
                                         <th>NEO</th>
                                         <th>UYDU</th>
                                         <th>TV TOPLAM</th>
-                                        <th>TOPLAM</th>
                                     </tr>
                                 </thead>
                                 <tbody id="tbody-onay">
                                     <?php if (empty($satirOnay)): ?>
-                                        <tr><td colspan="6" class="rapor-bos">Bu tarihe ait onay verisi bulunamadı</td></tr>
+                                        <tr><td colspan="5" class="rapor-bos">Bu tarihe ait onay verisi bulunamadı</td></tr>
                                     <?php else: ?>
                                         <?php foreach ($satirOnay as $s): ?>
                                         <tr>
@@ -568,7 +558,6 @@ $raporTarihi = $sonKayit['son_tarih']
                                             <td><?= $s['neo'] ?></td>
                                             <td><?= $s['uydu'] ?></td>
                                             <td><strong><?= $s['toplam'] ?></strong></td>
-                                            <td><strong><?= (int)$s['isp'] + (int)$s['neo'] + (int)$s['uydu'] ?></strong></td>
                                         </tr>
                                         <?php endforeach; ?>
                                         <tr class="toplam-satir">
@@ -577,7 +566,6 @@ $raporTarihi = $sonKayit['son_tarih']
                                             <td><?= $toplamOnay['neo'] ?></td>
                                             <td><?= $toplamOnay['uydu'] ?></td>
                                             <td><?= $toplamOnay['toplam'] ?></td>
-                                            <td><?= $toplamOnay['genel'] ?></td>
                                         </tr>
                                     <?php endif; ?>
                                 </tbody>
@@ -761,14 +749,13 @@ function tabloGuncelle(tbodyId, satirlar, tip) {
     tbody.querySelectorAll('tr[data-doldurma]').forEach(function (tr) { tr.remove(); });
 
     if (!satirlar || satirlar.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="6" class="rapor-bos">Bu tarihe ait ' + tip + ' verisi bulunamadı</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="5" class="rapor-bos">Bu tarihe ait ' + tip + ' verisi bulunamadı</td></tr>';
         return;
     }
 
     var isp = 0, neo = 0, uydu = 0, toplam = 0;
     var html = '';
     satirlar.forEach(function (s) {
-        var sGenel = (parseInt(s.isp) || 0) + (parseInt(s.neo) || 0) + (parseInt(s.uydu) || 0);
         isp    += parseInt(s.isp)    || 0;
         neo    += parseInt(s.neo)    || 0;
         uydu   += parseInt(s.uydu)   || 0;
@@ -779,7 +766,6 @@ function tabloGuncelle(tbodyId, satirlar, tip) {
             '<td>' + s.neo    + '</td>' +
             '<td>' + s.uydu   + '</td>' +
             '<td><strong>' + s.toplam + '</strong></td>' +
-            '<td><strong>' + sGenel + '</strong></td>' +
             '</tr>';
     });
     html += '<tr class="toplam-satir">' +
@@ -788,7 +774,6 @@ function tabloGuncelle(tbodyId, satirlar, tip) {
         '<td>' + neo    + '</td>' +
         '<td>' + uydu   + '</td>' +
         '<td>' + toplam + '</td>' +
-        '<td>' + (isp + neo + uydu) + '</td>' +
         '</tr>';
 
     tbody.innerHTML = html;

@@ -1462,19 +1462,10 @@ function bayiRaporGorselCiz(array $satis, array $kurulum, array $onay, array $vo
     $fzSec  = 11.0; $fzHdr = 9.0; $fzData = 9.0; $fzFoot = 8.5;
 
     // 5 kolonlu tablo tanımları (SATIŞ / KURULUM / ONAY)
-    $cols5W = [240, 68, 68, 76, 108, 100];
-    $cols5L = ['BAYİ İSMİ', 'ISP', 'NEO', 'UYDU', 'TV TOPLAM', 'TOPLAM'];
-    $cols5A = ['L', 'C', 'C', 'C', 'C', 'C'];
-    $cols5K = ['bayi', 'isp', 'neo', 'uydu', 'toplam', 'genel_toplam'];
-
-    // TOPLAM = ISP + NEO + UYDU
-    $genelEkle = fn(array $rows) => array_map(
-        fn($r) => $r + ['genel_toplam' => (int)($r['isp'] ?? 0) + (int)($r['neo'] ?? 0) + (int)($r['uydu'] ?? 0)],
-        $rows
-    );
-    $satis   = $genelEkle($satis);
-    $kurulum = $genelEkle($kurulum);
-    $onay    = $genelEkle($onay);
+    $cols5W = [300, 80, 80, 88, 112]; // toplam = $colW (660)
+    $cols5L = ['BAYİ İSMİ', 'ISP', 'NEO', 'UYDU', 'TV TOPLAM'];
+    $cols5A = ['L', 'C', 'C', 'C', 'C'];
+    $cols5K = ['bayi', 'isp', 'neo', 'uydu', 'toplam'];
 
     // Bölüm yükseklikleri
     // Sıra bazlı maksimum satır sayısı (Genel Toplam'ları hizalamak için)
