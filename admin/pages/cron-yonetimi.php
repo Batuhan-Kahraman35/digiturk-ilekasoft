@@ -543,7 +543,7 @@ const ANA_BAYILER = <?= json_encode($db->fetchAll("
            ISNULL(DigiturkAnaBayiler_BayiKodu, '') AS bayi_kodu, Durum AS durum
     FROM DigiturkAnaBayiler
     ORDER BY Durum DESC, DigiturkAnaBayiler_Ad"), JSON_UNESCAPED_UNICODE) ?>;
-const SECIMLI_TIPLER = ['birim', 'personel', 'anabayi'];
+const SECIMLI_TIPLER = ['birim', 'personel', 'anabayi', 'secim'];
 const canEdit  = <?= json_encode((bool)$pagePermissions['can_edit']) ?>;
 const canAdd   = <?= json_encode((bool)$pagePermissions['can_add']) ?>;
 const canDel   = <?= json_encode((bool)$pagePermissions['can_delete']) ?>;
@@ -715,7 +715,7 @@ function renderZamanlamaParams(schema, values) {
     schema.forEach(function (p) {
         const val = values[p.ad] || '';
         if (SECIMLI_TIPLER.includes(p.tip)) {
-            const opts = secimOptions(p.tip, val);
+            const opts = secimOptions(p.tip, val, p);
             $alan.append(`
             <div class="mb-2">
                 <label class="form-label mb-1">${esc(p.etiket)} ${p.zorunlu ? '<span class="text-danger">*</span>' : ''}</label>
@@ -764,7 +764,18 @@ function anaBayiOptions(selected) {
     return opts;
 }
 
-function secimOptions(tip, selected) {
+// tip:"secim" alanları için — seçenekler görev kaydının parametre şemasından (secenekler) gelir
+function secenekOptions(p, selected) {
+    let opts = '<option value="">— Seçiniz —</option>';
+    (p.secenekler || []).forEach(s => {
+        const sel = String(s.deger) === String(selected) ? 'selected' : '';
+        opts += `<option value="${esc(s.deger)}" ${sel}>${esc(s.etiket || s.deger)}</option>`;
+    });
+    return opts;
+}
+
+function secimOptions(tip, selected, p) {
+    if (tip === 'secim')   return secenekOptions(p || {}, selected);
     if (tip === 'birim')   return birimOptions(selected);
     if (tip === 'anabayi') return anaBayiOptions(selected);
     return personelOptions(selected);
@@ -884,7 +895,7 @@ function renderTetikleParams(params, values) {
     params.forEach(function (p) {
         const saved = values[p.ad] || '';
         if (SECIMLI_TIPLER.includes(p.tip)) {
-            const opts = secimOptions(p.tip, saved);
+            const opts = secimOptions(p.tip, saved, p);
             $alan.append(`
             <div class="mb-3">
                 <label class="form-label">${esc(p.etiket)} ${p.zorunlu ? '<span class="text-danger">*</span>' : ''}</label>

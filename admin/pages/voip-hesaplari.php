@@ -337,6 +337,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     FROM EntegrasyonKanallari k
                     INNER JOIN Entegrasyonlar e ON k.EntegrasyonKanallari_Entegrasyon_id = e.Entegrasyonlar_id
                     WHERE e.Entegrasyonlar_Tip = 'voip' AND k.Durum = 1 AND e.Durum = 1
+                      AND ISNULL(k.EntegrasyonKanallari_Kullanici, '') <> '' AND ISNULL(k.EntegrasyonKanallari_Instance, '') <> ''
                 ");
 
                 if (!$kanallar) {

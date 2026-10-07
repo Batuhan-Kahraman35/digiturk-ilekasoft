@@ -828,7 +828,9 @@ function gorevVoipHesapGuncelle(array $params, $db): array
                    e.Entegrasyonlar_BaseURL
             FROM EntegrasyonKanallari k
             INNER JOIN Entegrasyonlar e ON k.EntegrasyonKanallari_Entegrasyon_id = e.Entegrasyonlar_id
-            WHERE e.Entegrasyonlar_Tip = 'voip' AND k.Durum = 1 AND e.Durum = 1");
+            WHERE e.Entegrasyonlar_Tip = 'voip' AND k.Durum = 1 AND e.Durum = 1
+              -- Sippy giriş bilgisi tanımlı olmayan kanallar (ör. farklı altyapı) atlanır
+              AND ISNULL(k.EntegrasyonKanallari_Kullanici, '') <> '' AND ISNULL(k.EntegrasyonKanallari_Instance, '') <> ''");
         if (!$kanallar) { $cikti = ob_get_clean(); return ['durum' => 2, 'sonuc' => 'Aktif VoIP kanalı bulunamadı.', 'cikti' => $cikti]; }
 
         $toplamEklenen = $toplamGuncellenen = 0; $hatalar = [];
@@ -865,7 +867,9 @@ function gorevVoipGunlukHarcama(array $params, $db): array
                    k.EntegrasyonKanallari_Sifre, e.Entegrasyonlar_BaseURL
             FROM EntegrasyonKanallari k
             INNER JOIN Entegrasyonlar e ON k.EntegrasyonKanallari_Entegrasyon_id = e.Entegrasyonlar_id
-            WHERE e.Entegrasyonlar_Tip = 'voip' AND k.Durum = 1 AND e.Durum = 1");
+            WHERE e.Entegrasyonlar_Tip = 'voip' AND k.Durum = 1 AND e.Durum = 1
+              -- Sippy giriş bilgisi tanımlı olmayan kanallar (ör. farklı altyapı) atlanır
+              AND ISNULL(k.EntegrasyonKanallari_Kullanici, '') <> '' AND ISNULL(k.EntegrasyonKanallari_Instance, '') <> ''");
         if (!$kanallar) { return ['durum' => 2, 'sonuc' => 'Aktif VoIP kanalı bulunamadı.', 'cikti' => ob_get_clean()]; }
 
         $toplamEklenen = $toplamGuncellenen = 0; $hatalar = [];
@@ -3945,6 +3949,21 @@ function gorevIrisTalepEslestir(array $params, $db): array
     return ['durum' => $durum, 'sonuc' => $sonuc, 'cikti' => ob_get_clean()];
 }
 
+/**
+ * Birleşik VoIP görevi: islem parametresine göre hesap / harcama / bakiye işlemini çalıştırır.
+ * Her işlem ayrı zamanlayıcıyla (SabitParametreler.islem) tetiklenir.
+ */
+function gorevVoipIslemler(array $params, $db): array
+{
+    $islem = strtolower(trim($params['islem'] ?? ''));
+    return match($islem) {
+        'hesap'   => gorevVoipHesapGuncelle($params, $db),
+        'harcama' => gorevVoipGunlukHarcama($params, $db),
+        'bakiye'  => gorevVoipBakiyeKontrol($params, $db),
+        default   => ['durum' => 2, 'sonuc' => "Geçersiz VoIP işlemi: '{$islem}' (hesap | harcama | bakiye)", 'cikti' => ''],
+    };
+}
+
 function gorevCalistir(string $gorevKodu, array $params, $db): array
 {
     return match($gorevKodu) {
@@ -3952,6 +3971,8 @@ function gorevCalistir(string $gorevKodu, array $params, $db): array
         'iris_rapor'                => gorevIrisRapor($params, $db),
         'basvuru_surec_guncelle'    => gorevBasvuruSurecGuncelle($params, $db),
         'iris_talep_eslestir'       => gorevIrisTalepEslestir($params, $db),
+        'voip_islemler'             => gorevVoipIslemler($params, $db),
+        // Eski kodlar: geriye uyumluluk (voip_islemler'e taşındı)
         'voip_hesap_guncelle'       => gorevVoipHesapGuncelle($params, $db),
         'voip_gunluk_harcama'       => gorevVoipGunlukHarcama($params, $db),
         'voip_bakiye_kontrol'       => gorevVoipBakiyeKontrol($params, $db),
