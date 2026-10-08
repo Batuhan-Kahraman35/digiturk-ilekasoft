@@ -4032,9 +4032,13 @@ function xlsxOlustur(array $basliklar, array $satirlar, array $genislik = [], st
         'xl/worksheets/sheet1.xml' => $sheet,
     ];
 
-    $tmp = tempnam(sys_get_temp_dir(), 'xlsx');
+    // sys_get_temp_dir() Plesk Cron (CLI) altında yazılamaz olabildiği için proje storage/ kullanılır
+    $dir = dirname(__DIR__) . DIRECTORY_SEPARATOR . 'storage' . DIRECTORY_SEPARATOR . 'xlsx-tmp';
+    if (!is_dir($dir)) @mkdir($dir, 0777, true);
+    $tmp = $dir . DIRECTORY_SEPARATOR . 'xlsx_' . bin2hex(random_bytes(8)) . '.xlsx';
     $zip = new ZipArchive();
-    if ($zip->open($tmp, ZipArchive::OVERWRITE) !== true) throw new RuntimeException('xlsx oluşturulamadı (ZipArchive).');
+    $sonuc = $zip->open($tmp, ZipArchive::CREATE | ZipArchive::OVERWRITE);
+    if ($sonuc !== true) throw new RuntimeException('xlsx oluşturulamadı (ZipArchive kod: ' . $sonuc . ', yol: ' . $tmp . ').');
     foreach ($dosyalar as $ad => $icerik) $zip->addFromString($ad, $icerik);
     $zip->close();
     $veri = file_get_contents($tmp);
