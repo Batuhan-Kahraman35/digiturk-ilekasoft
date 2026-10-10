@@ -444,9 +444,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'excel
     if ($personelF !== '')  { $whereFilt[] = "t.AltBayiPersonel_ID = ?";   $paramsFilt[] = (int)$personelF; }
     if ($atananF === '0')      { $whereFilt[] = "t.Basvurular_AtananKullanici_ID IS NULL"; }
     elseif ($atananF !== '')   { $whereFilt[] = "t.Basvurular_AtananKullanici_ID = ?"; $paramsFilt[] = (int)$atananF; }
-    // Lead formu: '1' → dolu (lead formundan gelen), '0' → boş
-    if ($leadFormF === '1')      { $whereFilt[] = "t.ReklamLeadFormlari_ID IS NOT NULL"; }
-    elseif ($leadFormF === '0')  { $whereFilt[] = "t.ReklamLeadFormlari_ID IS NULL"; }
+    // Lead formu (çoklu, virgülle): 'yok' → reklamdan gelmeyen, pozitif id'ler → seçili lead formları
+    $lfSecim = array_filter(array_map('trim', explode(',', (string)$leadFormF)), 'strlen');
+    $lfIds   = array_values(array_unique(array_map('intval', array_filter($lfSecim, 'ctype_digit'))));
+    $lfKosul = [];
+    if (in_array('yok', $lfSecim, true)) { $lfKosul[] = "t.ReklamLeadFormlari_ID IS NULL"; }
+    if ($lfIds) { $lfKosul[] = "t.ReklamLeadFormlari_ID IN (" . implode(',', $lfIds) . ")"; }
+    if ($lfKosul) { $whereFilt[] = '(' . implode(' OR ', $lfKosul) . ')'; }
     if (preg_match('/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/', $tarihBas)) {
         $whereFilt[]  = "t.OlusturmaTarihi >= ?";
         $paramsFilt[] = str_replace('T', ' ', $tarihBas) . ':00';
@@ -893,9 +897,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 // Atanan kullanıcı: '0' → atanmamış (NULL), pozitif id → belirli kullanıcı
                 if ($atananF === '0')      { $whereFilt[] = "t.Basvurular_AtananKullanici_ID IS NULL"; }
                 elseif ($atananF !== '')   { $whereFilt[] = "t.Basvurular_AtananKullanici_ID = ?"; $paramsFilt[] = (int)$atananF; }
-                // Lead formu: '1' → dolu (lead formundan gelen), '0' → boş
-                if ($leadFormF === '1')      { $whereFilt[] = "t.ReklamLeadFormlari_ID IS NOT NULL"; }
-                elseif ($leadFormF === '0')  { $whereFilt[] = "t.ReklamLeadFormlari_ID IS NULL"; }
+                // Lead formu (çoklu, virgülle): 'yok' → reklamdan gelmeyen, pozitif id'ler → seçili lead formları
+                $lfSecim = array_filter(array_map('trim', explode(',', (string)$leadFormF)), 'strlen');
+                $lfIds   = array_values(array_unique(array_map('intval', array_filter($lfSecim, 'ctype_digit'))));
+                $lfKosul = [];
+                if (in_array('yok', $lfSecim, true)) { $lfKosul[] = "t.ReklamLeadFormlari_ID IS NULL"; }
+                if ($lfIds) { $lfKosul[] = "t.ReklamLeadFormlari_ID IN (" . implode(',', $lfIds) . ")"; }
+                if ($lfKosul) { $whereFilt[] = '(' . implode(' OR ', $lfKosul) . ')'; }
                 // datetime-local: "YYYY-MM-DDTHH:MM" → "YYYY-MM-DD HH:MM:SS"
                 if (preg_match('/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/', $tarihBas)) {
                     $whereFilt[]  = "t.OlusturmaTarihi >= ?";
@@ -2003,10 +2011,11 @@ $dagitLeadFormlari = $db->fetchAll("
                                 </div>
                                 <div class="col-md-3">
                                     <label class="form-label">Reklam</label>
-                                    <select class="form-select" name="lead_formu" id="filter_lead_formu">
-                                        <option value="">Tümü</option>
-                                        <option value="1">Var (reklam lead formundan gelen)</option>
-                                        <option value="0">Yok</option>
+                                    <select class="form-select" name="lead_formu[]" id="filter_lead_formu" multiple data-placeholder="Tümü">
+                                        <option value="yok">Yok (reklamdan gelmeyen)</option>
+                                        <?php foreach ($dagitLeadFormlari as $lf): ?>
+                                        <option value="<?= (int)$lf['id'] ?>"><?= htmlspecialchars($lf['ad']) ?></option>
+                                        <?php endforeach; ?>
                                     </select>
                                 </div>
                                 <div class="col-md-3">
@@ -2374,7 +2383,7 @@ $dagitLeadFormlari = $db->fetchAll("
                     d.f_personel        = $('#filter_personel').val() || '';
                     d.f_atanan          = $('#filter_atanan').val() || '';
                     d.f_sayfa           = $('#filter_sayfa').val() || '';
-                    d.f_lead_formu      = $('#filter_lead_formu').val() || '';
+                    d.f_lead_formu      = ($('#filter_lead_formu').val() || []).join(',');
                     d.f_kampanya        = $('#filter_kampanya').val() || '';
                     d.f_basvuru_durum   = $('#filter_basvuru_durum').val() || '';
                     d.f_surec_durum     = $('#filter_surec_durum').val() || '';
@@ -2477,7 +2486,8 @@ $dagitLeadFormlari = $db->fetchAll("
 
         $('#clearFilters').on('click', function () {
             $('#filterForm')[0].reset();
-            $('#filter_birim, #filter_personel, #filter_atanan, #filter_sayfa, #filter_lead_formu, #filter_kampanya, #filter_basvuru_durum, #filter_surec_durum, #filter_iletisim_durum').val('').trigger('change');
+            $('#filter_birim, #filter_personel, #filter_atanan, #filter_sayfa, #filter_kampanya, #filter_basvuru_durum, #filter_surec_durum, #filter_iletisim_durum').val('').trigger('change');
+            $('#filter_lead_formu').val(null).trigger('change');
             dataTable.ajax.reload();
             showToast('Filtreler temizlendi', 'info');
         });
@@ -2491,7 +2501,7 @@ $dagitLeadFormlari = $db->fetchAll("
                 f_personel:        $('#filter_personel').val() || '',
                 f_atanan:          $('#filter_atanan').val() || '',
                 f_sayfa:           $('#filter_sayfa').val() || '',
-                f_lead_formu:      $('#filter_lead_formu').val() || '',
+                f_lead_formu:      ($('#filter_lead_formu').val() || []).join(','),
                 f_kampanya:        $('#filter_kampanya').val() || '',
                 f_basvuru_durum:   $('#filter_basvuru_durum').val() || '',
                 f_surec_durum:     $('#filter_surec_durum').val() || '',
