@@ -371,4 +371,61 @@ function digiturkLoginKilidiniKaldir($db, int $personelId, int $kullaniciId = 1)
     ], ['DigiturkAltBayiPersonel_Id' => $personelId]);
 }
 
+/**
+ * IRIS / Digiturk login hatası şifre kaynaklıysa (DigiturkLoginHataKurallari, HataTuru='sifre')
+ * aktif adminlere (departman 1) panel + push bildirimi gönderir. Hesap kilitlenmez.
+ *
+ * Tekrar önleme: aynı hesap için okunmamış ya da son 24 saatte gönderilmiş bildirim varsa
+ * yenisi oluşturulmaz (görev her saat aynı hatayı aldığı için).
+ *
+ * @param string $hesapTuru 'anabayi' | 'personel'
+ * @return int Gönderilen bildirim sayısı (şifre hatası değilse / tekrar ise 0)
+ */
+function loginSifreHatasiBildir($db, string $hesapTuru, int $hesapId, string $hesapAd, string $mesaj, string $kaynak): int
+{
+    try {
+        $sifreHatasi = false;
+        foreach (digiturkLoginHataKurallari($db) as $k) {
+            if ($k['hataTuru'] !== 'sifre' || $k['kalip'] === null || $k['kalip'] === '') continue;
+            $regex = '/^' . strtr(preg_quote((string)$k['kalip'], '/'), ['%' => '.*', '_' => '.']) . '$/isu';
+            if (preg_match($regex, $mesaj)) { $sifreHatasi = true; break; }
+        }
+        if (!$sifreHatasi) return 0;
+
+        $etiket = $hesapTuru === 'anabayi' ? 'Ana bayi' : 'Personel';
+        $baslik = "Şifre hatası: {$etiket} #{$hesapId} {$hesapAd}";
+
+        $tekrar = $db->fetchOne("
+            SELECT TOP 1 Bildirimler_id AS id FROM dbo.Bildirimler
+            WHERE Bildirimler_Baslik = ?
+              AND (Bildirimler_Okundu = 0 OR OlusturmaTarihi > DATEADD(HOUR, -24, GETDATE()))", [mb_substr($baslik, 0, 200)]);
+        if ($tekrar) return 0;
+
+        require_once __DIR__ . '/Bildirim.php';
+        $adminler = $db->fetchAll("
+            SELECT kullanici_id AS id FROM kullanicilar
+            WHERE kullanici_departman_id = 1 AND kullanici_durum = 1") ?: [];
+
+        $govde = "{$kaynak} IRIS'e giriş yapamadı: " . mb_substr(preg_replace('/\s+/u', ' ', $mesaj), 0, 400)
+               . ' — Şifreyi IRIS\'te doğrulayıp Bayi Yönetimi\'nden güncelleyin.';
+
+        foreach ($adminler as $a) {
+            Bildirim::olustur($db, [
+                'kullanici_id' => (int)$a['id'],
+                'baslik'       => $baslik,
+                'govde'        => $govde,
+                'url'          => '/admin/bayi-yonetimi',
+                'tip'          => 'hata',
+                'push'         => true,
+                'olusturan'    => 1,
+            ]);
+        }
+        return count($adminler);
+    } catch (Throwable $e) {
+        // Bildirim hatası asıl görevi bozmasın
+        error_log('loginSifreHatasiBildir: ' . $e->getMessage());
+        return 0;
+    }
+}
+
 } // function_exists guard

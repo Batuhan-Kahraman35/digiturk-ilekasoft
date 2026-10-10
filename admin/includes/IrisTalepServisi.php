@@ -120,14 +120,20 @@ function irisTalepOturum($db): array
     $webToken = $r['token'] ?? null;
     if (!$webToken) throw new RuntimeException('Auth/GetToken token vermedi.');
 
-    $r = irisWebPost($ch, 'Auth/Login', [
-        'DealerCode' => $hesap['bayiKodu'], 'UserCode' => $hesap['kullanici'],
-        'Password'   => $hesap['sifre'],    'Language' => 'tr',
-    ], $webToken, null);
-    $veri     = irisVeri($r);
-    $verToken = $veri['Token'] ?? null;
-    if (!$verToken) {
-        throw new RuntimeException("IRIS login başarısız ({$hesap['ad']}): " . (irisMesaj($r) ?: 'bilinmeyen hata'));
+    try {
+        $r = irisWebPost($ch, 'Auth/Login', [
+            'DealerCode' => $hesap['bayiKodu'], 'UserCode' => $hesap['kullanici'],
+            'Password'   => $hesap['sifre'],    'Language' => 'tr',
+        ], $webToken, null);
+        $veri     = irisVeri($r);
+        $verToken = $veri['Token'] ?? null;
+        if (!$verToken) {
+            throw new RuntimeException("IRIS login başarısız ({$hesap['ad']}): " . (irisMesaj($r) ?: 'bilinmeyen hata'));
+        }
+    } catch (RuntimeException $e) {
+        require_once __DIR__ . '/DigiturkKotaServisi.php';
+        loginSifreHatasiBildir($db, 'anabayi', (int)$hesap['id'], (string)$hesap['ad'], $e->getMessage(), 'IRIS Talep Eşleştirme');
+        throw $e;
     }
 
     $r = irisWebPost($ch, 'Auth/GetToken', new stdClass(), $webToken, $verToken);

@@ -585,7 +585,7 @@ function irisWebTokenYenile($db, int $personelId): array
     $now = date('Y-m-d H:i:s');
     $per = $db->fetchOne("
         SELECT p.DigiturkAltBayiPersonel_KullaniciAdi, p.DigiturkAltBayiPersonel_Sifre,
-               n.DigiturkAnaBayiler_BayiKodu
+               p.DigiturkAltBayiPersonel_AdSoyad, n.DigiturkAnaBayiler_BayiKodu
         FROM DigiturkAltBayiPersonel p
         LEFT JOIN DigiturkAltBayiler a ON p.DigiturkAltBayiPersonel_AltBayiId = a.DigiturkAltBayiler_Id
         LEFT JOIN DigiturkAnaBayiler n ON a.DigiturkAltBayiler_AnaBayiId      = n.DigiturkAnaBayiler_Id
@@ -616,6 +616,8 @@ function irisWebTokenYenile($db, int $personelId): array
         return ['durum' => 1, 'token' => $verToken, 'mesaj' => "IRIS web token güncellendi (#{$personelId})."];
     } catch (Throwable $e) {
         $db->update('DigiturkAltBayiPersonel', ['DigiturkAltBayiPersonel_WebTokenDurum' => 2, 'GuncelleyenKullanici' => 1, 'GuncellemeTarihi' => $now], ['DigiturkAltBayiPersonel_Id' => $personelId]);
+        require_once dirname(__DIR__) . '/admin/includes/DigiturkKotaServisi.php';
+        loginSifreHatasiBildir($db, 'personel', $personelId, (string)($per['DigiturkAltBayiPersonel_AdSoyad'] ?? ''), $e->getMessage(), 'IRIS web token yenileme');
         return ['durum' => 2, 'token' => null, 'mesaj' => "IRIS web token hatası (#{$personelId}): " . $e->getMessage()];
     }
 }
@@ -750,9 +752,15 @@ function gorevIrisRapor(array $params, $db): array
 
         $webToken = $verToken = null;
         $r = irisPost($ch, 'Auth/GetToken', new stdClass(), $webToken, $verToken); $webToken = $r['token'];
-        $r = irisPost($ch, 'Auth/Login', ['DealerCode' => $dealerCode, 'UserCode' => $userCode, 'Password' => $password, 'Language' => 'tr'], $webToken, $verToken);
-        $verToken = $r['Data']['Token'] ?? $r['EntityData']['Token'] ?? null;
-        if (!$verToken) throw new RuntimeException('IRIS login başarısız: ' . ($r['ResponseMessage'] ?? $r['responseMessage'] ?? json_encode($r)));
+        try {
+            $r = irisPost($ch, 'Auth/Login', ['DealerCode' => $dealerCode, 'UserCode' => $userCode, 'Password' => $password, 'Language' => 'tr'], $webToken, $verToken);
+            $verToken = $r['Data']['Token'] ?? $r['EntityData']['Token'] ?? null;
+            if (!$verToken) throw new RuntimeException('IRIS login başarısız: ' . ($r['ResponseMessage'] ?? $r['responseMessage'] ?? json_encode($r, JSON_UNESCAPED_UNICODE)));
+        } catch (RuntimeException $e) {
+            require_once dirname(__DIR__) . '/admin/includes/DigiturkKotaServisi.php';
+            loginSifreHatasiBildir($db, 'personel', $personelId, (string)($personel['DigiturkAltBayiPersonel_AdSoyad'] ?? ''), $e->getMessage(), 'IRIS Rapor');
+            throw $e;
+        }
         $r = irisPost($ch, 'Auth/GetToken', new stdClass(), $webToken, $verToken); $webToken = $r['token'];
 
         $db->update('DigiturkAltBayiPersonel', ['DigiturkAltBayiPersonel_WebToken' => $verToken, 'DigiturkAltBayiPersonel_WebTokenSuresi' => date('Y-m-d H:i:s', strtotime('+3 hours')), 'DigiturkAltBayiPersonel_WebTokenDurum' => 1, 'GuncelleyenKullanici' => 1, 'GuncellemeTarihi' => date('Y-m-d H:i:s')], ['DigiturkAltBayiPersonel_Id' => $personelId]);
@@ -3812,7 +3820,7 @@ function gorevIrisTalepEslestir(array $params, $db): array
         echo "  IRIS oturumu: {$o['hesap']['ad']} ({$o['hesap']['bayiKodu']}) — rol {$o['hesap']['rol']}\n\n";
 
         $sayac = ['eslesti' => 0, 'talep_yok' => 0, 'personel_eslesmedi' => 0,
-                  'talep_kullanimda' => 0, 'hata' => 0, 'yazilan' => 0];
+                  'talep_kullanimda' => 0, 'telefon_eksik' => 0, 'hata' => 0, 'yazilan' => 0];
         $sorulanlar      = [];  // IRIS'e gerçekten sorulanlar → damgalanacak
         $bulunanTalepler = [];  // bu tur içinde bir talep iki kayda birden bağlanmasın
         $yazilanlar = []; $hatalar = [];
@@ -3824,9 +3832,11 @@ function gorevIrisTalepEslestir(array $params, $db): array
             $tel = irisTelefonBirlestir($k['phoneAreaNumber'], $k['phoneNumber']);
             $ad  = trim(($k['Isim'] ?? '') . ' ' . ($k['Soyisim'] ?? ''));
 
+            // Eksik telefon IRIS hatası değil: hata sayılmaz, damgalanır ki her turda kotayı
+            // tüketip görevi "Hata"ya düşürmesin (bekleme_gun sonra yeniden denenir).
             if (strlen($tel) < 10) {
-                $sayac['hata']++;
-                $hatalar[] = "#{$id} telefon hanesi eksik";
+                $sayac['telefon_eksik']++;
+                $sorulanlar[] = $id;
                 continue;
             }
 
@@ -3907,11 +3917,13 @@ function gorevIrisTalepEslestir(array $params, $db): array
 
         echo "\n  Özet: {$sayac['eslesti']} eşleşti, {$sayac['yazilan']} yazıldı, "
            . "{$sayac['talep_yok']} talep yok, {$sayac['personel_eslesmedi']} personel eşleşmedi, "
-           . "{$sayac['talep_kullanimda']} talep kullanımda, {$sayac['hata']} hata, {$damgalanan} damgalandı\n";
+           . "{$sayac['talep_kullanimda']} talep kullanımda, {$sayac['telefon_eksik']} telefon eksik, "
+           . "{$sayac['hata']} hata, {$damgalanan} damgalandı\n";
 
         $sonuc = "{$sayac['yazilan']} kayıt eşleştirildi"
                . " ({$sayac['talep_yok']} talep yok, {$sayac['personel_eslesmedi']} personel eşleşmedi"
                . ($sayac['talep_kullanimda'] ? ", {$sayac['talep_kullanimda']} talep kullanımda" : '')
+               . ($sayac['telefon_eksik'] ? ", {$sayac['telefon_eksik']} telefon eksik" : '')
                . ($sayac['hata'] ? ", {$sayac['hata']} hata" : '')
                . ", {$damgalanan} damgalandı)" . ($kuru ? ' [KURU]' : '');
 
