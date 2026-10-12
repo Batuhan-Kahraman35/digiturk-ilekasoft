@@ -92,6 +92,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             exit;
         }
 
+        // ── IRIS süreç durumları (tip:"irissurec" çoklu seçim) ──────────────
+        // Kurulum bayisine yönlenen kayıtlarda geçen IrisRapor_BasvuruSurecDurumu değerleri.
+        if ($action === 'iris_surec_durumlari') {
+            $durumlar = $db->fetchAll("
+                SELECT IrisRapor_BasvuruSurecDurumu AS kod, COUNT(*) AS adet
+                FROM DigiturkIrisRapor
+                WHERE IrisRapor_MemoYonlenenBayiKodu IS NOT NULL
+                  AND IrisRapor_BasvuruSurecDurumu IS NOT NULL
+                  AND IrisRapor_BasvuruSurecDurumu <> ''
+                GROUP BY IrisRapor_BasvuruSurecDurumu
+                ORDER BY IrisRapor_BasvuruSurecDurumu");
+            foreach ($durumlar as &$d) $d['ad'] = $d['kod'] . ' — ' . $d['adet'] . ' kayıt';
+            unset($d);
+            echo json_encode(['success' => true, 'data' => $durumlar], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+
         // ── Zamanlayıcı ekle ───────────────────────────────────────────────
         if ($action === 'zamanlama_ekle') {
             if (!$pagePermissions['can_add']) throw new Exception('Ekleme yetkiniz yok.');
@@ -562,8 +579,24 @@ const ANA_BAYILER = <?= json_encode($db->fetchAll("
     ORDER BY Durum DESC, DigiturkAnaBayiler_Ad"), JSON_UNESCAPED_UNICODE) ?>;
 const SECIMLI_TIPLER = ['birim', 'personel', 'anabayi', 'secim'];
 // Çoklu seçimli tipler: değer virgülle birleştirilmiş metin olarak saklanır
-const COKLU_TIPLER   = ['kurulumbayi'];
-let KURULUM_BAYILERI = null; // tip:"kurulumbayi" — ilk ihtiyaçta AJAX ile çekilir
+// Liste ilk ihtiyaçta AJAX ile çekilir ve tip bazında önbelleğe alınır (liste: null = henüz çekilmedi)
+const COKLU_KAYNAK = {
+    kurulumbayi: {
+        action: 'kurulum_bayileri', liste: null, hata: 'Kurulum bayileri alınamadı',
+        etiket: b => `${b.ad || b.kod} (${b.kod})`,
+        tumEtiket: '★ Tüm bayiler (yeniler dahil)',
+        tumBtn: 'Tüm bayiler (yeniler dahil)',
+        bilgi: '"Tüm bayiler" seçilirse sonradan rapora düşen yeni kurulum bayileri de otomatik dahil olur. "Listedekilerin tümünü seç" yalnız şu an listede olanları kaydeder.',
+    },
+    irissurec: {
+        action: 'iris_surec_durumlari', liste: null, hata: 'Süreç durumları alınamadı',
+        etiket: b => b.ad || b.kod,
+        tumEtiket: '★ Tüm süreç durumları',
+        tumBtn: 'Tüm süreç durumları',
+        bilgi: 'Boş bırakılır veya "Tüm süreç durumları" seçilirse süreç durumuna göre filtre uygulanmaz.',
+    },
+};
+const COKLU_TIPLER = Object.keys(COKLU_KAYNAK);
 const canEdit  = <?= json_encode((bool)$pagePermissions['can_edit']) ?>;
 const canAdd   = <?= json_encode((bool)$pagePermissions['can_add']) ?>;
 const canDel   = <?= json_encode((bool)$pagePermissions['can_delete']) ?>;
@@ -740,7 +773,7 @@ function renderZamanlamaParams(schema, values) {
                 <label class="form-label mb-1">${esc(p.etiket)} ${p.zorunlu ? '<span class="text-danger">*</span>' : ''}</label>
                 <select class="form-select form-select-sm" id="zp_${p.ad}" multiple></select>
             </div>`);
-            cokluSecimKur('#zp_' + p.ad, '#zamanlamaModal', val);
+            cokluSecimKur('#zp_' + p.ad, '#zamanlamaModal', val, p.tip);
         } else if (SECIMLI_TIPLER.includes(p.tip)) {
             const opts = secimOptions(p.tip, val, p);
             $alan.append(`
@@ -808,9 +841,8 @@ function secimOptions(tip, selected, p) {
     return personelOptions(selected);
 }
 
-// "*" = tüm kurulum bayileri; görev çalıştığı anda rapordaki bütün bayileri alır (yeni gelenler dahil)
+// "*" = tümü; görev çalıştığı anda rapordaki bütün değerleri alır (yeni gelenler dahil)
 const TUM_BAYILER = '*';
-const TUM_BAYILER_ETIKET = '★ Tüm bayiler (yeniler dahil)';
 
 // Form alanının değeri; çoklu seçimde dizi virgülle birleştirilir. "*" seçiliyse yalnız "*" döner.
 function paramDeger(selId) {
@@ -819,11 +851,12 @@ function paramDeger(selId) {
     return (Array.isArray(v) ? v.join(',') : (v || '')).trim();
 }
 
-// tip:"kurulumbayi" — kayıtlı kodlar hemen seçili gösterilir, liste gelince adlarıyla doldurulur
-function cokluSecimKur(selId, modalId, kayitli) {
+// Çoklu seçimli tipler (COKLU_KAYNAK) — kayıtlı kodlar hemen seçili gösterilir, liste gelince adlarıyla doldurulur
+function cokluSecimKur(selId, modalId, kayitli, tip) {
+    const kaynak = COKLU_KAYNAK[tip];
     const secili = String(kayitli || '').split(',').map(s => s.trim()).filter(Boolean);
     const $sel   = $(selId);
-    secili.forEach(k => $sel.append(new Option(k === TUM_BAYILER ? TUM_BAYILER_ETIKET : k, k, true, true)));
+    secili.forEach(k => $sel.append(new Option(k === TUM_BAYILER ? kaynak.tumEtiket : k, k, true, true)));
     modalSelect2(selId, modalId);
 
     // "*" diğer seçimlerle birlikte durmaz: "*" seçilince tek kalır, başka bayi seçilince "*" kalkar
@@ -832,15 +865,14 @@ function cokluSecimKur(selId, modalId, kayitli) {
         $sel.val(v === TUM_BAYILER ? [TUM_BAYILER] : ($sel.val() || []).filter(x => x !== TUM_BAYILER)).trigger('change');
     });
 
-    // Tüm bayiler / tümünü seç / temizle
+    // Tümü / tümünü seç / temizle
     const $btn = $(`
         <div class="mt-1">
-            <button type="button" class="btn btn-link btn-sm p-0 me-3 fw-semibold"><i class="bi bi-infinity"></i> Tüm bayiler (yeniler dahil)</button>
+            <button type="button" class="btn btn-link btn-sm p-0 me-3 fw-semibold"><i class="bi bi-infinity"></i> ${esc(kaynak.tumBtn)}</button>
             <button type="button" class="btn btn-link btn-sm p-0 me-3"><i class="bi bi-check2-all"></i> Listedekilerin tümünü seç</button>
             <button type="button" class="btn btn-link btn-sm p-0 text-danger"><i class="bi bi-x-lg"></i> Temizle</button>
         </div>
-        <div class="form-text">"Tüm bayiler" seçilirse sonradan rapora düşen yeni kurulum bayileri de otomatik dahil olur.
-            "Listedekilerin tümünü seç" yalnız şu an listede olanları kaydeder.</div>`);
+        <div class="form-text">${esc(kaynak.bilgi)}</div>`);
     $btn.find('button').eq(0).on('click', () => $sel.val([TUM_BAYILER]).trigger('change'));
     $btn.find('button').eq(1).on('click', () => $sel.val($sel.find('option').map((i, o) => o.value).get().filter(x => x !== TUM_BAYILER)).trigger('change'));
     $btn.find('button').eq(2).on('click', () => $sel.val(null).trigger('change'));
@@ -848,17 +880,17 @@ function cokluSecimKur(selId, modalId, kayitli) {
 
     const doldur = function () {
         $sel.empty();
-        $sel.append(new Option(TUM_BAYILER_ETIKET, TUM_BAYILER, false, secili.includes(TUM_BAYILER)));
-        const kodlar = KURULUM_BAYILERI.map(b => String(b.kod));
-        KURULUM_BAYILERI.forEach(b => $sel.append(new Option(`${b.ad || b.kod} (${b.kod})`, b.kod, false, secili.includes(String(b.kod)))));
+        $sel.append(new Option(kaynak.tumEtiket, TUM_BAYILER, false, secili.includes(TUM_BAYILER)));
+        const kodlar = kaynak.liste.map(b => String(b.kod));
+        kaynak.liste.forEach(b => $sel.append(new Option(kaynak.etiket(b), b.kod, false, secili.includes(String(b.kod)))));
         // Rapordan düşmüş ama zamanlayıcıda kayıtlı kod kaybolmasın
         secili.filter(k => k !== TUM_BAYILER && !kodlar.includes(k)).forEach(k => $sel.append(new Option(k + ' (raporda yok)', k, true, true)));
         $sel.trigger('change.select2');
     };
-    if (KURULUM_BAYILERI) { doldur(); return; }
-    $.post(PAGE_URL, { action: 'kurulum_bayileri' }, function (r) {
-        if (!r.success) { showToast(r.message || 'Kurulum bayileri alınamadı', 'error'); return; }
-        KURULUM_BAYILERI = r.data || [];
+    if (kaynak.liste) { doldur(); return; }
+    $.post(PAGE_URL, { action: kaynak.action }, function (r) {
+        if (!r.success) { showToast(r.message || kaynak.hata, 'error'); return; }
+        kaynak.liste = r.data || [];
         doldur();
     }, 'json');
 }
@@ -983,7 +1015,7 @@ function renderTetikleParams(params, values) {
                 <label class="form-label">${esc(p.etiket)} ${p.zorunlu ? '<span class="text-danger">*</span>' : ''}</label>
                 <select class="form-select" id="tp_${p.ad}" multiple></select>
             </div>`);
-            cokluSecimKur('#tp_' + p.ad, '#tetikleModal', saved);
+            cokluSecimKur('#tp_' + p.ad, '#tetikleModal', saved, p.tip);
             return;
         }
         if (SECIMLI_TIPLER.includes(p.tip)) {

@@ -4069,6 +4069,7 @@ function xlsxOlustur(array $basliklar, array $satirlar, array $genislik = [], st
  *   alicilar        : Telefon (905xx) ve/veya grup JID (120363...@g.us), virgüllü
  *   randevu_gunleri : Göreli gün aralığı "bas-bit" (0 = bugün). Örn: "1-1" yarın, "0-6" 7 gün
  *   bos_gonder      : "1" ise randevu yokken de bilgi mesajı (düz metin) gider
+ *   surec_durumlari : IrisRapor_BasvuruSurecDurumu değerleri, virgüllü; boş veya "*" = filtre yok
  * Kapanmış memolar da listelenir ("Durum" sütununda Kapandı).
  */
 function gorevKurulumBayiRandevuBildir(array $params, $db): array
@@ -4111,6 +4112,16 @@ function gorevKurulumBayiRandevuBildir(array $params, $db): array
             $bayiKosul  = 'r.IrisRapor_MemoYonlenenBayiKodu IN (' . implode(',', array_fill(0, count($bayiKodlari), '?')) . ')';
             $bayiParams = $bayiKodlari;
         }
+
+        // Süreç durumu filtresi: boş / "*" = tümü (eski zamanlayıcılar bu parametreyi taşımaz)
+        $surecler = array_values(array_unique(array_filter(array_map('trim', explode(',', $params['surec_durumlari'] ?? '')))));
+        if (in_array('*', $surecler, true)) $surecler = [];
+        echo '  Süreç durumu: ' . ($surecler ? implode(', ', $surecler) : 'Tümü') . "\n";
+        if ($surecler) {
+            $bayiKosul  .= ' AND r.IrisRapor_BasvuruSurecDurumu IN (' . implode(',', array_fill(0, count($surecler), '?')) . ')';
+            $bayiParams  = array_merge($bayiParams, $surecler);
+        }
+
         $rows = $db->fetchAll("
             SELECT r.IrisRapor_MemoYonlenenBayiKodu         AS BayiKodu,
                    r.IrisRapor_MemoYonlenenBayiAdi          AS BayiAdi,
@@ -4122,6 +4133,7 @@ function gorevKurulumBayiRandevuBildir(array $params, $db): array
                    r.IrisRapor_MemoKayitTipi                AS Tip,
                    r.IrisRapor_TalepTuru                    AS TalepTuru,
                    r.IrisRapor_SatisDurumu                  AS SatisDurumu,
+                   r.IrisRapor_BasvuruSurecDurumu           AS SurecDurumu,
                    r.IrisRapor_RandevuTarihi                AS Randevu,
                    r.IrisRapor_MemoKapanisTarihi            AS Kapanis
             FROM DigiturkIrisRapor r
@@ -4136,7 +4148,8 @@ function gorevKurulumBayiRandevuBildir(array $params, $db): array
             return ['durum' => 1, 'sonuc' => "{$baslik}: randevu yok, gönderim yapılmadı.", 'cikti' => ob_get_clean()];
         }
 
-        $ust = "📅 *Kurulum Randevuları — {$baslik}*";
+        $ust = "📅 *Kurulum Randevuları — {$baslik}*"
+             . ($surecler ? "\nSüreç durumu: " . implode(', ', $surecler) : '');
 
         $basarili = $hatali = 0;
         if (!$rows) {
@@ -4152,13 +4165,13 @@ function gorevKurulumBayiRandevuBildir(array $params, $db): array
                 'BayiKodu' => 'Kurulum Bayi Kodu', 'BayiAdi' => 'Kurulum Bayisi', 'Yonetici' => 'Bayi Yöneticisi',
                 'Bolge' => 'Bölge', 'RandevuTarih' => 'Randevu Tarihi', 'RandevuSaat' => 'Randevu Saati',
                 'MusteriNo' => 'Müşteri No', 'TalepId' => 'Talep No', 'MemoId' => 'Memo No', 'Tip' => 'Tip',
-                'TalepTuru' => 'Talep Türü', 'SatisDurumu' => 'Satış Durumu', 'Durum' => 'Durum',
-                'Kapanis' => 'Memo Kapanış',
+                'TalepTuru' => 'Talep Türü', 'SatisDurumu' => 'Satış Durumu', 'SurecDurumu' => 'Süreç Durumu',
+                'Durum' => 'Durum', 'Kapanis' => 'Memo Kapanış',
             ];
             $genislik = [
                 'BayiKodu' => 14, 'BayiAdi' => 34, 'Yonetici' => 24, 'Bolge' => 14, 'RandevuTarih' => 13,
                 'RandevuSaat' => 12, 'MusteriNo' => 13, 'TalepId' => 12, 'MemoId' => 12, 'Tip' => 8,
-                'TalepTuru' => 16, 'SatisDurumu' => 16, 'Durum' => 10, 'Kapanis' => 17,
+                'TalepTuru' => 16, 'SatisDurumu' => 16, 'SurecDurumu' => 26, 'Durum' => 10, 'Kapanis' => 17,
             ];
 
             $satirlar = [];
