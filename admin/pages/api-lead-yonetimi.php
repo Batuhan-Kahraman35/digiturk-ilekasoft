@@ -7,10 +7,13 @@
 require_once __DIR__ . '/../auth.php';
 require_once __DIR__ . '/../includes/PageAuth.php';
 require_once __DIR__ . '/../includes/CallCenterHelper.php';
+require_once __DIR__ . '/../includes/SiteAyarHelper.php';
 requireAuth();
 
 $user = Auth::user();
 $db   = Database::getInstance();
+
+$varsayilanEndpoint = SiteAyarHelper::callcenterLeadUrl();
 
 $currentPagefile = basename($_SERVER['PHP_SELF']);
 $pageinfo = $db->fetchOne("
@@ -137,7 +140,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                 $endpoint = trim($_POST['endpoint_url'] ?? '');
                 if ($endpoint === '') {
-                    $endpoint = 'https://callcenter.ornekyazilim.com/api/leadapi/addLead';
+                    $endpoint = $varsayilanEndpoint;
                 }
 
                 $data = [
@@ -222,7 +225,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
 
                 $eklenen = 0; $guncellenen = 0;
-                $endpoint = 'https://callcenter.ornekyazilim.com/api/leadapi/addLead';
+                $endpoint = $varsayilanEndpoint;
 
                 foreach ($sonuc['records'] as $rec) {
                     $kaynakId = (int)$rec['id'];
@@ -485,8 +488,8 @@ $birimler = $db->fetchAll("
                         <div class="col-md-12">
                             <label class="form-label">Endpoint URL</label>
                             <input type="text" class="form-control mono" id="endpoint_url" name="endpoint_url"
-                                   value="https://callcenter.ornekyazilim.com/api/leadapi/addLead"
-                                   placeholder="https://callcenter.ornekyazilim.com/api/leadapi/addLead">
+                                   value="<?= htmlspecialchars($varsayilanEndpoint) ?>"
+                                   placeholder="<?= htmlspecialchars($varsayilanEndpoint) ?>">
                             <small class="text-muted">Boş bırakılırsa varsayılan addLead adresi kullanılır.</small>
                         </div>
                         <div class="col-md-12">
@@ -619,6 +622,7 @@ $birimler = $db->fetchAll("
 <script src="/Admin/assets/js/custom.js"></script>
 
 <script>
+    const VARSAYILAN_ENDPOINT = <?= json_encode($varsayilanEndpoint, JSON_UNESCAPED_SLASHES | JSON_HEX_TAG) ?>;
     const permissions = {
         canAdd:    <?= $permissions['can_add']    ? 'true' : 'false' ?>,
         canEdit:   <?= $permissions['can_edit']   ? 'true' : 'false' ?>,
@@ -784,7 +788,7 @@ $birimler = $db->fetchAll("
         document.getElementById('kayitForm').reset();
         document.getElementById('rec_id').value = '';
         document.getElementById('kayitModalLabel').textContent = 'Yeni Kayıt Ekle';
-        document.getElementById('endpoint_url').value = 'https://callcenter.ornekyazilim.com/api/leadapi/addLead';
+        document.getElementById('endpoint_url').value = VARSAYILAN_ENDPOINT;
         document.getElementById('durum').checked = true;
     }
 
@@ -813,7 +817,7 @@ $birimler = $db->fetchAll("
         $.post('', { action: 'get', id: id }, function (r) {
             if (!r.success || !r.data) { showToast('Kayıt bulunamadı', 'error'); return; }
             const d = r.data;
-            const url   = d.CallCenterApiLead_EndpointUrl || 'https://callcenter.ornekyazilim.com/api/leadapi/addLead';
+            const url   = d.CallCenterApiLead_EndpointUrl || VARSAYILAN_ENDPOINT;
             const token = d.CallCenterApiLead_Token || '';
             const camp  = d.CallCenterApiLead_CampaignId || '';
 

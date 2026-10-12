@@ -145,6 +145,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 'site_ayarlari_site_url' => $_POST['site_url'] ?? '',
                 'site_ayarlari_site_title' => $_POST['site_title'] ?? '',
                 'site_ayarlari_Admin_email' => $_POST['Admin_email'] ?? null,
+                'site_ayarlari_firma_adi' => trim($_POST['firma_adi'] ?? '') ?: null,
+                'site_ayarlari_iletisim_eposta' => trim($_POST['iletisim_eposta'] ?? '') ?: null,
+                'site_ayarlari_callcenter_lead_url' => trim($_POST['callcenter_lead_url'] ?? '') ?: null,
                 'site_ayarlari_timezone' => $_POST['timezone'] ?? 'Europe/Istanbul',
                 'site_ayarlari_language' => $_POST['language'] ?? 'tr-TR',
                 'site_ayarlari_date_format' => $_POST['date_format'] ?? 'dd.MM.yyyy',
@@ -321,8 +324,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                                 <div class="mb-3">
                                                     <label for="site_url" class="form-label">site URL <span class="text-danger">*</span></label>
                                                     <input type="url" class="form-control" id="site_url" name="site_url" 
-                                                           placeholder="https://proje.ornekyazilim.com/admin" required>
-                                                    <div class="form-text">sitenin tam adresi</div>
+                                                           placeholder="https://alan.adi" required>
+                                                    <div class="form-text">Sitenin kök adresi (/admin olmadan). Gizlilik / veri silme sayfaları ve Meta OAuth dönüş adresi buradan üretilir.</div>
                                                 </div>
                                             </div>
                                         </div>
@@ -341,6 +344,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                                     <input type="email" class="form-control" id="Admin_email" name="Admin_email" 
                                                            placeholder="destek@ornekyazilim.com">
                                                     <div class="form-text">Sistem bildirimleri için</div>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        <div class="row">
+                                            <div class="col-md-6">
+                                                <div class="mb-3">
+                                                    <label for="firma_adi" class="form-label">Firma Adı</label>
+                                                    <input type="text" class="form-control" id="firma_adi" name="firma_adi" maxlength="150"
+                                                           placeholder="Firma / bayi adı">
+                                                    <div class="form-text">Gizlilik politikası ve veri silme sayfalarında görünür. Boşsa site başlığı kullanılır.</div>
+                                                </div>
+                                            </div>
+                                            <div class="col-md-6">
+                                                <div class="mb-3">
+                                                    <label for="iletisim_eposta" class="form-label">İletişim E-postası</label>
+                                                    <input type="email" class="form-control" id="iletisim_eposta" name="iletisim_eposta" maxlength="150"
+                                                           placeholder="Ziyaretçiye gösterilecek e-posta adresi">
+                                                    <div class="form-text">Ziyaretçiye gösterilen adres ve push bildirim (VAPID) iletişimi. Boşsa admin e-postası kullanılır.</div>
                                                 </div>
                                             </div>
                                         </div>
@@ -604,6 +626,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                             </div>
                                         </div>
 
+                                        <div class="form-section-title">CallCenter Ayarları</div>
+                                        <div class="row">
+                                            <div class="col-md-6">
+                                                <div class="mb-3">
+                                                    <label for="callcenter_lead_url" class="form-label">CallCenter Lead Adresi</label>
+                                                    <input type="url" class="form-control" id="callcenter_lead_url" name="callcenter_lead_url" maxlength="300"
+                                                           placeholder="https://callcenter.alan.adi/api/leadapi/addLead">
+                                                    <div class="form-text">API Lead Yönetimi'nde endpoint boş bırakılan kayıtların varsayılan addLead adresi</div>
+                                                </div>
+                                            </div>
+                                        </div>
+
                                         <div class="form-section-title">Log Ayarlari</div>
                                         <div class="row">
                                             <div class="col-md-4">
@@ -783,7 +817,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 'default_avatar', 'og_gorsel_url', 'footer_yazi', 'login_attempt_limit', 
                 'login_block_duration_min', 'session_timeout_min', 'password_min_length', 
                 'maintenance_message', 'log_level', 'log_retention_days',
-                'destek_api_key', 'destek_api_url'
+                'destek_api_key', 'destek_api_url',
+                'firma_adi', 'iletisim_eposta', 'callcenter_lead_url'
             ];
             
             fields.forEach(field => {

@@ -4,11 +4,14 @@
  * App settings → Temel → "Privacy Policy URL" olarak girilecek:
  *   https://proje.ornekyazilim.com/gizlilik-politikasi.php
  *
- * Aşağıdaki sabitleri kendi firma bilgilerinle GÜNCELLE.
+ * Firma adı / e-posta / adres: dbo.tanim_site_ayarlari (Site Yönetimi)
  */
-const FIRMA_ADI       = 'ORNEK';
-const ILETISIM_EPOSTA = 'info@ornekyazilim.com';   // ← kendi e-postanla değiştir
-const WEB_ADRESI      = 'https://proje.ornekyazilim.com';
+require_once __DIR__ . '/admin/db.php';
+require_once __DIR__ . '/admin/includes/SiteAyarHelper.php';
+
+define('FIRMA_ADI',       SiteAyarHelper::firmaAdi());
+define('ILETISIM_EPOSTA', SiteAyarHelper::iletisimEposta());
+define('WEB_ADRESI',      SiteAyarHelper::kokUrl());
 const YURURLUK_TARIHI = '29.06.2026';
 ?>
 <!DOCTYPE html>

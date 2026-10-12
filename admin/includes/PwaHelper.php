@@ -31,8 +31,16 @@ class PwaHelper
         return [
             'public'  => $ayar['public'],
             'private' => $ayar['private'],
-            'subject' => $ayar['subject'] ?? 'mailto:destek@ornekyazilim.com',
+            'subject' => $ayar['subject'] ?? self::varsayilanSubject(),
         ];
+    }
+
+    /** VAPID subject: kanal ayarında yoksa site iletişim e-postası */
+    private static function varsayilanSubject(): string
+    {
+        require_once __DIR__ . '/SiteAyarHelper.php';
+        $eposta = SiteAyarHelper::iletisimEposta();
+        return 'mailto:' . ($eposta !== '' ? $eposta : 'admin@' . ($_SERVER['HTTP_HOST'] ?? 'localhost'));
     }
 
     /**

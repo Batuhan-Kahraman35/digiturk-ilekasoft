@@ -10,13 +10,14 @@
  *  2) Normal ziyaret (GET): kullanıcıya silme talebi talimatları gösterir.
  *     ?id=KOD ile talep durumu görüntülenir.
  *
- * Sabitleri kendi bilgilerinle GÜNCELLE.
+ * Firma adı / e-posta / adres: dbo.tanim_site_ayarlari (Site Yönetimi)
  */
 require_once __DIR__ . '/admin/db.php';
+require_once __DIR__ . '/admin/includes/SiteAyarHelper.php';
 
-const FIRMA_ADI       = 'ORNEK';
-const ILETISIM_EPOSTA = 'info@ornekyazilim.com';   // ← kendi e-postanla değiştir
-const SITE_URL        = 'https://proje.ornekyazilim.com';
+define('FIRMA_ADI',       SiteAyarHelper::firmaAdi());
+define('ILETISIM_EPOSTA', SiteAyarHelper::iletisimEposta());
+define('SITE_URL',        SiteAyarHelper::kokUrl());
 
 $logDosya = __DIR__ . '/logs/meta-veri-silme.log';
 

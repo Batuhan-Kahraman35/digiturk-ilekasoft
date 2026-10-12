@@ -12,8 +12,9 @@
 
 require_once __DIR__ . '/../admin/auth.php';
 requireAuth();
+require_once __DIR__ . '/../admin/includes/SiteAyarHelper.php';
 
-const META_REDIRECT_URI = 'https://proje.ornekyazilim.com/oauth/meta-callback.php';
+define('META_REDIRECT_URI', SiteAyarHelper::metaRedirectUri());
 const META_SCOPES = 'pages_show_list,pages_manage_metadata,pages_manage_ads,leads_retrieval,pages_read_engagement,business_management';
 
 $db = Database::getInstance();

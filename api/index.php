@@ -1012,7 +1012,11 @@ function callCenterApiLeadGetir($db, int $altBayiId, int $apiLeadId): ?array
  */
 function callCenterLeadGonder(array $lead, array $in): array
 {
-    $url = trim((string)($lead['CallCenterApiLead_EndpointUrl'] ?? '')) ?: 'https://callcenter.ornekyazilim.com/api/leadapi/addLead';
+    require_once dirname(__DIR__) . '/admin/includes/SiteAyarHelper.php';
+    $url = trim((string)($lead['CallCenterApiLead_EndpointUrl'] ?? '')) ?: SiteAyarHelper::callcenterLeadUrl();
+    if ($url === '') {
+        return ['gonderildi' => false, 'hata' => 'CallCenter lead adresi tanımlı değil (Site Yönetimi)'];
+    }
     $tok = trim((string)($lead['CallCenterApiLead_Token'] ?? ''));
 
     // Telefon: ülke+alan+numara birleşik, yalnız rakam (ör. 905550000000)
