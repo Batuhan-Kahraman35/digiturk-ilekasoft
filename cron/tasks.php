@@ -4070,6 +4070,7 @@ function xlsxOlustur(array $basliklar, array $satirlar, array $genislik = [], st
  *   randevu_gunleri : Göreli gün aralığı "bas-bit" (0 = bugün). Örn: "1-1" yarın, "0-6" 7 gün
  *   bos_gonder      : "1" ise randevu yokken de bilgi mesajı (düz metin) gider
  *   surec_durumlari : IrisRapor_BasvuruSurecDurumu değerleri, virgüllü; boş veya "*" = filtre yok
+ *   saat_bas / saat_bitis : Mesai aralığı (0-23, bitiş saati dahil); dışında gönderim atlanır
  * Kapanmış memolar da listelenir ("Durum" sütununda Kapandı).
  */
 function gorevKurulumBayiRandevuBildir(array $params, $db): array
@@ -4078,6 +4079,15 @@ function gorevKurulumBayiRandevuBildir(array $params, $db): array
     $sonuc = ''; $durum = 1;
 
     try {
+        // Mesai aralığı kontrolü (parametresiz eski zamanlayıcılar: 0-23 = her saat)
+        $saatBas     = isset($params['saat_bas'])   && $params['saat_bas']   !== '' ? (int)$params['saat_bas']   : 0;
+        $saatBitis   = isset($params['saat_bitis']) && $params['saat_bitis'] !== '' ? (int)$params['saat_bitis'] : 23;
+        $simdikiSaat = (int)date('G');
+        if ($simdikiSaat < $saatBas || $simdikiSaat > $saatBitis) {
+            echo "  Saat {$simdikiSaat}:xx → mesai dışında ({$saatBas}-{$saatBitis}), atlandı.\n";
+            return ['durum' => 1, 'sonuc' => "Mesai saati dışında ({$simdikiSaat}:xx), gönderim atlandı.", 'cikti' => ob_get_clean()];
+        }
+
         require_once __DIR__ . '/../admin/includes/EntegrasyonHelper.php';
 
         $bayiKodlari = array_values(array_unique(array_filter(array_map('trim', explode(',', $params['bayi_kodlari'] ?? '')))));
