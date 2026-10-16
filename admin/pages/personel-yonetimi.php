@@ -131,6 +131,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     k.kullanici_departman_id,
                     k.kullanici_birim_id,
                     k.kullanici_tc_kimlik_no,
+                    k.kullanici_maas_tutari,
                     CONVERT(VARCHAR(10), k.kullanici_dogum_tarihi, 120) as kullanici_dogum_tarihi,
                     d.departman_adi,
                     b.KullaniciBirim_Adi as birim_adi,
@@ -422,6 +423,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     k.kullanici_soyad,
                     k.kullanici_telefon,
                     k.kullanici_tc_kimlik_no,
+                    k.kullanici_maas_tutari,
                     CONVERT(VARCHAR(10), k.kullanici_dogum_tarihi, 104) as kullanici_dogum_tarihi,
                     CASE WHEN k.kullanici_durum = 1 THEN 'Aktif' WHEN k.kullanici_durum = 0 THEN 'Pasif' ELSE 'Belirsiz' END as durum_text,
                     d.departman_adi,
@@ -469,6 +471,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             echo '<th>Departman</th>';
             echo '<th>Birim</th>';
             echo '<th>Doğum tarihi</th>';
+            echo '<th>Maaş Tutarı</th>';
             echo '<th>Kayıt tarihi</th>';
             echo '<th>Durum</th>';
             echo '</tr>';
@@ -487,6 +490,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 echo '<td>' . htmlspecialchars($k['departman_adi'] ?? '') . '</td>';
                 echo '<td>' . htmlspecialchars($k['birim_adi'] ?? '') . '</td>';
                 echo '<td>' . htmlspecialchars($k['kullanici_dogum_tarihi'] ?? '') . '</td>';
+                echo '<td>' . ($k['kullanici_maas_tutari'] !== null ? number_format((float)$k['kullanici_maas_tutari'], 2, ',', '.') : '') . '</td>';
                 echo '<td>' . htmlspecialchars($k['kullanici_olusturma_tarihi'] ?? '') . '</td>';
                 echo '<td>' . htmlspecialchars($k['durum_text'] ?? '') . '</td>';
                 echo '</tr>';
@@ -743,6 +747,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                         <th>Departman</th>
                                         <th>Birim</th>
                                         <th>Doğum tarihi</th>
+                                        <th>Maaş Tutarı</th>
                                         <th>Durum</th>
                                         <th>İşlemler</th>
                                     </tr>
@@ -922,7 +927,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             }
                         }
                     },
-                    { 
+                    {
+                        data: 'kullanici_maas_tutari',
+                        className: 'text-end',
+                        defaultContent: '<span class="text-muted">-</span>',
+                        render: (data, type) => {
+                            if (data === null || data === '') return type === 'display' ? '<span class="text-muted">-</span>' : 0;
+                            if (type !== 'display') return parseFloat(data);
+                            return parseFloat(data).toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' ₺';
+                        }
+                    },
+                    {
                         data: 'kullanici_durum',
                         className: 'text-center',
                         render: (data, type, row) => {

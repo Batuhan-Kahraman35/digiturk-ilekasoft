@@ -6,7 +6,8 @@
  * Alanlar: kullanici_id, kullanici_email, kullanici_sifre_hash, kullanici_ad, kullanici_soyad,
  *          kullanici_telefon, kullanici_durum, kullanici_olusturma_tarihi, kullanici_son_giris_tarihi,
  *          kullanici_departman_id, kullanici_tc_kimlik_no, kullanici_dogum_tarihi,
- *          kullanici_olusturan_id, kullanici_guncelleme_tarihi, kullanici_guncelleyen_id
+ *          kullanici_olusturan_id, kullanici_guncelleme_tarihi, kullanici_guncelleyen_id,
+ *          kullanici_maas_tutari
  */
 
 require_once __DIR__ . '/../auth.php';
@@ -198,7 +199,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $dogum_tarihi = !empty($_POST['dogum_tarihi']) ? $_POST['dogum_tarihi'] : null;
             $durum = intval($_POST['durum'] ?? 1);
             $sifre_degistirmeli = intval($_POST['sifre_degistirmeli'] ?? 1);
-            
+            $maas_ham = str_replace(',', '.', trim((string)($_POST['maas_tutari'] ?? '')));
+            $maas_tutari = $maas_ham !== '' ? $maas_ham : null;
+
+            // Validasyon - Maaş tutarı (opsiyonel, doluysa sıfır veya pozitif sayı)
+            if ($maas_tutari !== null && (!is_numeric($maas_tutari) || (float)$maas_tutari < 0)) {
+                throw new Exception('Maaş tutarı geçerli bir sayı olmalıdır');
+            }
+            $maas_tutari = $maas_tutari !== null ? round((float)$maas_tutari, 2) : null;
+
             // Validasyon - Ad Soyad zorunlu
             if (empty($ad) || empty($soyad)) {
                 throw new Exception('Ad ve Soyad zorunludur');
@@ -287,6 +296,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'kullanici_dogum_tarihi' => $dogum_tarihi,
                     'kullanici_durum' => $durum,
                     'kullanici_sifre_degistirmeli' => $sifre_degistirmeli,
+                    'kullanici_maas_tutari' => $maas_tutari,
                     'kullanici_olusturma_tarihi' => date('Y-m-d H:i:s'),
                     'kullanici_olusturan_id' => $user['kullanici_id']
                 ]);
@@ -337,6 +347,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'kullanici_dogum_tarihi' => $dogum_tarihi,
                     'kullanici_durum' => $durum,
                     'kullanici_sifre_degistirmeli' => $sifre_degistirmeli,
+                    'kullanici_maas_tutari' => $maas_tutari,
                     'kullanici_guncelleme_tarihi' => date('Y-m-d H:i:s'),
                     'kullanici_guncelleyen_id' => $user['kullanici_id']
                 ];
@@ -478,6 +489,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                     </div>
                                 </div>
                                 
+                                <!-- Ücret Bilgileri -->
+                                <div class="card card-primary card-outline mb-3">
+                                    <div class="card-header">
+                                        <h3 class="card-title"><i class="bi bi-cash-stack"></i> Ücret Bilgileri</h3>
+                                    </div>
+                                    <div class="card-body">
+                                        <div class="row g-3">
+                                            <div class="col-md-6">
+                                                <label for="maas_tutari" class="form-label">Maaş Tutarı</label>
+                                                <div class="input-group">
+                                                    <input type="number" class="form-control" id="maas_tutari" name="maas_tutari"
+                                                           min="0" step="0.01" placeholder="0,00"
+                                                           value="<?= isset($kullanici['kullanici_maas_tutari']) ? htmlspecialchars(number_format((float)$kullanici['kullanici_maas_tutari'], 2, '.', '')) : '' ?>">
+                                                    <span class="input-group-text">₺</span>
+                                                </div>
+                                                <div class="form-text">Aylık net maaş (opsiyonel)</div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
                                 <!-- Güvenlik Bilgileri -->
                                 <div class="card card-primary card-outline mb-3">
                                     <div class="card-header">
