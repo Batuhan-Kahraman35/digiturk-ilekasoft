@@ -52,7 +52,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         // ── Görev + Zamanlayıcı listesi ────────────────────────────────────
         if ($action === 'gorev_listele') {
-            $gorevler = $db->fetchAll("SELECT CronGorevler_Id, CronGorevler_Ad, CronGorevler_Aciklama, CronGorevler_GorevKodu, CronGorevler_Parametreler, Durum FROM CronGorevler ORDER BY CronGorevler_Id");
+            $gorevler = $db->fetchAll("SELECT CronGorevler_Id, CronGorevler_Ad, CronGorevler_Aciklama, CronGorevler_GorevKodu, CronGorevler_Parametreler, CronGorevler_HataTalebi, Durum FROM CronGorevler ORDER BY CronGorevler_Id");
             foreach ($gorevler as &$g) {
                 $g['Zamanlamalar'] = $db->fetchAll("
                     SELECT z.CronZamanlamalar_Id, z.CronZamanlamalar_Ad, z.CronZamanlamalar_CronIfadesi,
@@ -185,6 +185,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             exit;
         }
 
+        // ── Görev hata talebi toggle (hata durumunda destek talebi açılsın mı) ──
+        if ($action === 'gorev_hata_talebi') {
+            if (!$pagePermissions['can_edit']) throw new Exception('Düzenleme yetkiniz yok.');
+            $id    = intval($_POST['gorev_id'] ?? 0);
+            $durum = intval($_POST['durum'] ?? 0) === 1 ? 1 : 0;
+            if (!$id) throw new Exception('Geçersiz id.');
+            $db->update('CronGorevler', ['CronGorevler_HataTalebi' => $durum, 'GuncelleyenKullanici' => $user['kullanici_id'], 'GuncellemeTarihi' => date('Y-m-d H:i:s')], ['CronGorevler_Id' => $id]);
+            echo json_encode(['success' => true, 'message' => $durum ? 'Hata durumunda destek talebi açılacak.' : 'Hata talebi kapatıldı.']);
+            exit;
+        }
+
         // ── Manuel tetikle ─────────────────────────────────────────────────
         if ($action === 'tetikle') {
             if (!$pagePermissions['can_edit']) throw new Exception('Düzenleme yetkiniz yok.');
@@ -246,7 +257,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     l.CronCalismaLog_Parametreler,
                     l.CronCalismaLog_CalismaDurum,
                     l.CronCalismaLog_Sonuc,
-                    l.CronCalismaLog_TetikleyenTur
+                    l.CronCalismaLog_TetikleyenTur,
+                    l.CronCalismaLog_TalepId
                 FROM CronCalismaLog l
                 INNER JOIN CronGorevler g ON l.CronCalismaLog_GorevId = g.CronGorevler_Id
                 LEFT  JOIN CronZamanlamalar z ON l.CronCalismaLog_ZamanlamaId = z.CronZamanlamalar_Id
@@ -595,6 +607,15 @@ const COKLU_KAYNAK = {
         tumBtn: 'Tüm süreç durumları',
         bilgi: 'Boş bırakılır veya "Tüm süreç durumları" seçilirse süreç durumuna göre filtre uygulanmaz.',
     },
+    // Liste sayfada hazır (ANA_BAYILER) → AJAX'a gerek yok, kod = ana bayi Id
+    anabayicoklu: {
+        action: null, hata: 'Ana bayiler alınamadı',
+        liste: ANA_BAYILER.map(b => ({ kod: String(b.id), ad: b.ad, bayi_kodu: b.bayi_kodu, durum: b.durum })),
+        etiket: b => (b.bayi_kodu ? `${b.ad} (${b.bayi_kodu})` : b.ad) + (Number(b.durum) === 1 ? '' : ' — pasif'),
+        tumEtiket: '★ Tüm aktif ana bayiler',
+        tumBtn: 'Tüm aktif ana bayiler',
+        bilgi: 'Boş bırakılırsa ana bayi şifre kontrolü yapılmaz. "Tüm aktif ana bayiler" sonradan eklenen aktif bayileri de kapsar.',
+    },
 };
 const COKLU_TIPLER = Object.keys(COKLU_KAYNAK);
 const canEdit  = <?= json_encode((bool)$pagePermissions['can_edit']) ?>;
@@ -696,7 +717,15 @@ function renderGorevler(data) {
                     <span class="cron-code ms-2">${esc(g.CronGorevler_GorevKodu)}</span>
                     ${g.CronGorevler_Aciklama ? `<span class="text-muted small ms-2">${esc(g.CronGorevler_Aciklama)}</span>` : ''}
                 </div>
-                <div class="d-flex gap-1">${tetikleBtn} ${ekleBtn}</div>
+                <div class="d-flex gap-1 align-items-center">
+                    <div class="form-check form-switch mb-0 me-2" title="Görev hata ile biterse destek talebi açılır (24 saatte en fazla bir)">
+                        <input class="form-check-input" type="checkbox" role="switch" id="hata_talebi_${g.CronGorevler_Id}" name="hata_talebi_${g.CronGorevler_Id}" value="1"
+                               ${Number(g.CronGorevler_HataTalebi) === 1 ? 'checked' : ''} ${canEdit ? '' : 'disabled'}
+                               onchange="gorevHataTalebi(${g.CronGorevler_Id}, this)">
+                        <label class="form-check-label small" for="hata_talebi_${g.CronGorevler_Id}">Hata Talebi</label>
+                    </div>
+                    ${tetikleBtn} ${ekleBtn}
+                </div>
             </div>
             <div class="card-body p-0">
                 <table class="table table-bordered table-sm mb-0 z-table">
@@ -706,6 +735,14 @@ function renderGorevler(data) {
             </div>
         </div>`);
     });
+}
+
+function gorevHataTalebi(gorevId, el) {
+    const durum = el.checked ? 1 : 0;
+    $.post(PAGE_URL, { action: 'gorev_hata_talebi', gorev_id: gorevId, durum }, function (r) {
+        if (r.success) showToast(r.message, 'success');
+        else { el.checked = !el.checked; showToast(r.message, 'error'); }
+    }).fail(() => { el.checked = !el.checked; showToast('İstek başarısız.', 'error'); });
 }
 
 function calismaDurumBadge(d) {
@@ -1121,6 +1158,9 @@ function logListele() {
                 esc(l.BitisTarihi || '—'),
                 l.CronCalismaLog_SureSaniye != null ? `<span class="badge bg-light text-dark">${l.CronCalismaLog_SureSaniye}s</span>` : '—',
                 calismaDurumBadge(l.CronCalismaLog_CalismaDurum),
+                (l.CronCalismaLog_TalepId !== null && l.CronCalismaLog_TalepId !== undefined
+                    ? `<span class="badge bg-info-subtle text-info-emphasis me-1" title="Hata için açılan destek talebi"><i class="bi bi-ticket-detailed"></i> ${Number(l.CronCalismaLog_TalepId) > 0 ? 'Talep #' + Number(l.CronCalismaLog_TalepId) : 'Talep (no alınamadı)'}</span>`
+                    : '') +
                 `<small class="text-muted">${esc((l.CronCalismaLog_Sonuc || '').substring(0, 80))}${(l.CronCalismaLog_Sonuc || '').length > 80 ? '…' : ''}</small>`
             ]);
         });

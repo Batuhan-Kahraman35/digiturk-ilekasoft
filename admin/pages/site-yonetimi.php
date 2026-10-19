@@ -174,6 +174,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 'site_ayarlari_log_retention_days' => (int)($_POST['log_retention_days'] ?? 30),
                 'site_ayarlari_destek_api_key' => $_POST['destek_api_key'] ?? null,
                 'site_ayarlari_destek_api_url' => $_POST['destek_api_url'] ?? null,
+                'site_ayarlari_cron_hata_kullanici_id' => (int)($_POST['cron_hata_kullanici_id'] ?? 0) ?: null,
+                'site_ayarlari_cron_hata_kategori_id'  => (int)($_POST['cron_hata_kategori_id']  ?? 0) ?: null,
+                'site_ayarlari_cron_hata_oncelik_id'   => (int)($_POST['cron_hata_oncelik_id']   ?? 0) ?: null,
                 'site_ayarlari_guncelleme_tarihi' => date('Y-m-d H:i:s'),
                 'site_ayarlari_guncelleyen_kullanici_id' => $user['kullanicilar_id']
             ];
@@ -203,6 +206,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
+// Cron hata talebi ayarları: talebi açacak kullanıcı (e-postası olmalı) + Destek API kategori/öncelik listesi
+$cronHataKullanicilar = $db->fetchAll("
+    SELECT kullanici_id AS id,
+           LTRIM(RTRIM(ISNULL(kullanici_ad, '') + ' ' + ISNULL(kullanici_soyad, ''))) AS ad,
+           kullanici_email AS eposta
+    FROM kullanicilar
+    WHERE kullanici_durum = 1 AND ISNULL(kullanici_email, '') <> ''
+    ORDER BY kullanici_ad, kullanici_soyad") ?: [];
+
+require_once __DIR__ . '/../includes/DestekHelper.php';
+$destekMeta        = DestekHelper::aktifMi() ? (DestekHelper::meta()['data'] ?? []) : [];
+$destekKategoriler = $destekMeta['kategoriler'] ?? [];
+$destekOncelikler  = $destekMeta['oncelikler']  ?? [];
 ?>
 <!DOCTYPE html>
 <html lang="tr">
@@ -210,10 +226,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title><?= htmlspecialchars($pageTitle) ?> - <?= htmlspecialchars($siteTitle) ?></title>
-    
+
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/source-sans-3@5.0.12/index.css" crossorigin="anonymous">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.13.1/font/bootstrap-icons.min.css" crossorigin="anonymous">
     <link rel="stylesheet" href="/Admin/assets/css/Adminlte.min.css">
+    <link href="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/select2-bootstrap-5-theme@1.3.0/dist/select2-bootstrap-5-theme.min.css" rel="stylesheet">
     
     <style>
         .form-section-title {
@@ -626,6 +644,48 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                             </div>
                                         </div>
 
+                                        <div class="form-section-title">Cron Hata Talebi</div>
+                                        <div class="row">
+                                            <div class="col-md-4">
+                                                <div class="mb-3">
+                                                    <label for="cron_hata_kullanici_id" class="form-label">Talebi Açan Kullanıcı</label>
+                                                    <select class="form-select" id="cron_hata_kullanici_id" name="cron_hata_kullanici_id">
+                                                        <option value="">— Kapalı (talep açılmaz) —</option>
+                                                        <?php foreach ($cronHataKullanicilar as $k): ?>
+                                                        <option value="<?= (int)$k['id'] ?>"><?= htmlspecialchars($k['ad'] . ' (' . $k['eposta'] . ')') ?></option>
+                                                        <?php endforeach; ?>
+                                                    </select>
+                                                    <div class="form-text">Hata veren cron görevleri için bu kullanıcı adına destek talebi açılır</div>
+                                                </div>
+                                            </div>
+                                            <div class="col-md-4">
+                                                <div class="mb-3">
+                                                    <label for="cron_hata_kategori_id" class="form-label">Kategori</label>
+                                                    <select class="form-select" id="cron_hata_kategori_id" name="cron_hata_kategori_id">
+                                                        <option value="">— Seçiniz —</option>
+                                                        <?php foreach ($destekKategoriler as $k): ?>
+                                                        <option value="<?= (int)$k['id'] ?>"><?= htmlspecialchars($k['ad']) ?></option>
+                                                        <?php endforeach; ?>
+                                                    </select>
+                                                </div>
+                                            </div>
+                                            <div class="col-md-4">
+                                                <div class="mb-3">
+                                                    <label for="cron_hata_oncelik_id" class="form-label">Öncelik</label>
+                                                    <select class="form-select" id="cron_hata_oncelik_id" name="cron_hata_oncelik_id">
+                                                        <option value="">— Seçiniz —</option>
+                                                        <?php foreach ($destekOncelikler as $o): ?>
+                                                        <option value="<?= (int)$o['id'] ?>"><?= htmlspecialchars($o['ad']) ?></option>
+                                                        <?php endforeach; ?>
+                                                    </select>
+                                                </div>
+                                            </div>
+                                            <?php if (!$destekKategoriler): ?>
+                                            <div class="col-12"><div class="form-text text-warning mt-0 mb-3"><i class="bi bi-exclamation-triangle"></i> Destek API'den kategori/öncelik listesi alınamadı; önce API Key ve URL'yi kaydedin.</div></div>
+                                            <?php endif; ?>
+                                            <div class="col-12"><div class="form-text mt-0 mb-3">Aynı görev + zamanlayıcı için 24 saatte en fazla bir talep açılır. Görev bazında kapatmak için Cron Yönetimi'ndeki "Hata Talebi" anahtarını kullanın.</div></div>
+                                        </div>
+
                                         <div class="form-section-title">CallCenter Ayarları</div>
                                         <div class="row">
                                             <div class="col-md-6">
@@ -700,10 +760,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         <?php include __DIR__ . '/../includes/footer.php'; ?>
     </div>
     
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@popperjs/core@2.11.8/dist/umd/popper.min.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.7/dist/js/bootstrap.min.js" crossorigin="anonymous"></script>
     <script src="/Admin/assets/js/Adminlte.min.js"></script>
-    
+    <script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
+    <script>
+        // Formdaki tüm dropdown'lar aranabilir (custom.js bu sayfada yüklü değil, init burada)
+        $(function () { $('#settingsForm .form-select').select2({ theme: 'bootstrap-5', width: '100%' }); });
+    </script>
+
     <script>
         // Sayfa yetkileri
         const pagePermissions = {
@@ -818,7 +884,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 'login_block_duration_min', 'session_timeout_min', 'password_min_length', 
                 'maintenance_message', 'log_level', 'log_retention_days',
                 'destek_api_key', 'destek_api_url',
-                'firma_adi', 'iletisim_eposta', 'callcenter_lead_url'
+                'firma_adi', 'iletisim_eposta', 'callcenter_lead_url',
+                'cron_hata_kullanici_id', 'cron_hata_kategori_id', 'cron_hata_oncelik_id'
             ];
             
             fields.forEach(field => {
@@ -842,6 +909,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     element.checked = value == 1;
                 }
             });
+
+            // Select2 görünümü .value ile güncellenmez
+            $('#settingsForm .form-select').trigger('change.select2');
         }
         
         // Kaydet butonu

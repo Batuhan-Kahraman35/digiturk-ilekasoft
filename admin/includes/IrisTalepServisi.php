@@ -151,6 +151,63 @@ function irisTalepOturumKapat(array $o): void
     if (isset($o['ch']) && $o['ch']) @curl_close($o['ch']);
 }
 
+/**
+ * Ana bayi IRIS kullanıcı adı/şifresini dener (Auth/GetToken → Auth/Login).
+ * Token DB'ye yazılmaz; yalnız giriş yapılıp yapılamadığı döner.
+ * Şifre hatasında loginSifreHatasiBildir ile adminlere bildirim gider.
+ *
+ * Kullanan: cron Token Güncelle (tüm aktif ana bayiler), bayi-yonetimi "Şifreyi Test Et"
+ *
+ * @return array ['basarili' => bool, 'atlandi' => bool, 'mesaj' => string, 'rol' => ?string]
+ */
+function irisAnaBayiSifreTest($db, int $anaBayiId, string $kaynak): array
+{
+    $h = $db->fetchOne("
+        SELECT DigiturkAnaBayiler_Ad           AS ad,
+               DigiturkAnaBayiler_BayiKodu     AS bayiKodu,
+               DigiturkAnaBayiler_KullaniciAdi AS kullanici,
+               DigiturkAnaBayiler_Sifre        AS sifre
+        FROM DigiturkAnaBayiler
+        WHERE DigiturkAnaBayiler_Id = ?", [$anaBayiId]);
+
+    if (!$h) {
+        return ['basarili' => false, 'atlandi' => true, 'mesaj' => "Ana bayi #{$anaBayiId} bulunamadı.", 'rol' => null];
+    }
+    if (empty($h['bayiKodu']) || empty($h['kullanici']) || empty($h['sifre'])) {
+        return ['basarili' => false, 'atlandi' => true, 'mesaj' => "{$h['ad']}: bayi kodu / kullanıcı adı / şifre boş.", 'rol' => null];
+    }
+
+    $ch = curl_init();
+    curl_setopt_array($ch, [
+        CURLOPT_COOKIEFILE => '', CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_SSL_VERIFYPEER => true, CURLOPT_CONNECTTIMEOUT => 30,
+        CURLOPT_TIMEOUT => 60, CURLOPT_ENCODING => '',
+    ]);
+
+    try {
+        $r = irisWebPost($ch, 'Auth/GetToken', new stdClass(), null, null);
+        $webToken = $r['token'] ?? null;
+        if (!$webToken) throw new RuntimeException('Auth/GetToken token vermedi.');
+
+        $r = irisWebPost($ch, 'Auth/Login', [
+            'DealerCode' => $h['bayiKodu'], 'UserCode' => $h['kullanici'],
+            'Password'   => $h['sifre'],    'Language' => 'tr',
+        ], $webToken, null);
+        $veri = irisVeri($r);
+        if (empty($veri['Token'])) {
+            throw new RuntimeException(irisMesaj($r) ?: 'IRIS login başarısız');
+        }
+
+        return ['basarili' => true, 'atlandi' => false, 'mesaj' => "{$h['ad']}: IRIS girişi başarılı.", 'rol' => $veri['Role'] ?? null];
+    } catch (Throwable $e) {
+        require_once __DIR__ . '/DigiturkKotaServisi.php';
+        loginSifreHatasiBildir($db, 'anabayi', $anaBayiId, (string)$h['ad'], $e->getMessage(), $kaynak);
+        return ['basarili' => false, 'atlandi' => false, 'mesaj' => "{$h['ad']}: " . $e->getMessage(), 'rol' => null];
+    } finally {
+        @curl_close($ch);
+    }
+}
+
 // ── ccapi ────────────────────────────────────────────────────────────────────
 function irisCcapiPost($db, int $endpointId, $body): array
 {

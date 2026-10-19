@@ -335,6 +335,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             exit;
         }
 
+        if ($action === 'ana_sifre_test') {
+            if ($birimKisitli) throw new Exception('Ana bayi işlemleri için yetkiniz yok.');
+            if (!$pagePermissions['can_edit']) throw new Exception('Düzenleme yetkiniz bulunmamaktadır.');
+
+            $id = intval($_POST['id'] ?? 0);
+            if ($id <= 0) throw new Exception('Geçersiz id.');
+
+            require_once __DIR__ . '/../includes/IrisTalepServisi.php';
+            $t = irisAnaBayiSifreTest($db, $id, 'Bayi Yönetimi şifre testi');
+
+            echo json_encode(['success' => $t['basarili'], 'message' => $t['mesaj'], 'rol' => $t['rol']]);
+            exit;
+        }
+
         // =====================================================================
         // ALT BAYİLER
         // =====================================================================
@@ -1583,6 +1597,7 @@ function initAnaTable() {
                 render: d => {
                     anaRows[d.DigiturkAnaBayiler_Id] = d;
                     let b = '';
+                    if (perms.can_edit)   b += `<button class="btn btn-sm btn-info me-1" title="Şifreyi Test Et" onclick="anaSifreTest(${d.DigiturkAnaBayiler_Id}, this)"><i class="bi bi-shield-check"></i></button>`;
                     if (perms.can_edit)   b += `<button class="btn btn-sm btn-warning me-1" onclick="anaModal(${d.DigiturkAnaBayiler_Id})"><i class="bi bi-pencil"></i></button>`;
                     if (perms.can_delete) b += `<button class="btn btn-sm btn-danger"        onclick="anaSil(${d.DigiturkAnaBayiler_Id})"><i class="bi bi-trash"></i></button>`;
                     return b || '-';
@@ -1643,6 +1658,19 @@ function anaKaydet() {
             showToast(r.message, 'error');
         }
     });
+}
+
+function anaSifreTest(id, btn) {
+    const $b   = $(btn);
+    const ikon = $b.html();
+    $b.prop('disabled', true).html('<span class="spinner-border spinner-border-sm"></span>');
+
+    post({ action: 'ana_sifre_test', id })
+        .done(r => {
+            if (r.success) showToast(r.message + (r.rol ? ` (Rol: ${r.rol})` : ''), 'success');
+            else           showToast(r.message, 'error');
+        })
+        .always(() => $b.prop('disabled', false).html(ikon));
 }
 
 function anaSil(id) {

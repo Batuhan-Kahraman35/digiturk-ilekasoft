@@ -109,6 +109,86 @@ function cronLogBitir($db, int $logId, int $durum, string $sonuc, float $basZama
         'GuncelleyenKullanici'        => 0,
         'GuncellemeTarihi'            => $simdi,
     ], ['CronCalismaLog_Id' => $logId]);
+
+    if ($durum === 2) cronHataTalebiAc($db, $logId, $sonuc);
+}
+
+/**
+ * Hatalı biten çalışma için destek talebi açar (Örnek Destek API).
+ *
+ * - Görevin CronGorevler_HataTalebi = 0 ise açılmaz (Cron Yönetimi'nden görev bazında kapatılır).
+ * - Panelden elle çalıştırılan görevde açılmaz: kullanıcı sonucu ekranda görüyor.
+ * - Aynı görev + zamanlayıcı için son 24 saatte talep açıldıysa yenisi açılmaz.
+ * - Talebi açan kullanıcı / kategori / öncelik Site Yönetimi → Destek API Ayarları'ndan gelir;
+ *   kullanıcı seçilmemişse özellik kapalıdır.
+ * Açılan talep no CronCalismaLog_TalepId'ye yazılır (0 = yanıt belirsiz, açılmış olabilir).
+ * Hiçbir koşulda exception fırlatmaz; görev logunu bozmaz.
+ */
+function cronHataTalebiAc($db, int $logId, string $sonuc): void
+{
+    try {
+        $log = $db->fetchOne("
+            SELECT l.CronCalismaLog_GorevId             AS gorevId,
+                   l.CronCalismaLog_ZamanlamaId         AS zamanlamaId,
+                   l.CronCalismaLog_TetikleyenKullanici AS tetikleyen,
+                   CONVERT(VARCHAR(19), l.CronCalismaLog_BaslangicTarihi, 120) AS baslangic,
+                   l.CronCalismaLog_Parametreler        AS params,
+                   g.CronGorevler_Ad                    AS gorevAd,
+                   g.CronGorevler_GorevKodu             AS gorevKodu,
+                   g.CronGorevler_HataTalebi            AS hataTalebi,
+                   z.CronZamanlamalar_Ad                AS zamanlamaAd
+            FROM CronCalismaLog l
+            INNER JOIN CronGorevler g ON l.CronCalismaLog_GorevId = g.CronGorevler_Id
+            LEFT  JOIN CronZamanlamalar z ON l.CronCalismaLog_ZamanlamaId = z.CronZamanlamalar_Id
+            WHERE l.CronCalismaLog_Id = ?", [$logId]);
+
+        if (!$log || (int)$log['hataTalebi'] !== 1 || !empty($log['tetikleyen'])) return;
+
+        $tekrar = $db->fetchOne("
+            SELECT TOP 1 CronCalismaLog_Id AS id FROM CronCalismaLog
+            WHERE CronCalismaLog_GorevId = ?
+              AND ISNULL(CronCalismaLog_ZamanlamaId, 0) = ?
+              AND CronCalismaLog_TalepId IS NOT NULL
+              AND CronCalismaLog_BitisTarihi > DATEADD(HOUR, -24, GETDATE())
+              AND CronCalismaLog_Id <> ?", [(int)$log['gorevId'], (int)($log['zamanlamaId'] ?? 0), $logId]);
+        if ($tekrar) return;
+
+        $ayar = $db->fetchOne("
+            SELECT TOP 1 site_ayarlari_cron_hata_kullanici_id AS kullanici,
+                         site_ayarlari_cron_hata_kategori_id  AS kategori,
+                         site_ayarlari_cron_hata_oncelik_id   AS oncelik
+            FROM dbo.tanim_site_ayarlari ORDER BY site_ayarlari_id DESC");
+        $kullaniciId = (int)($ayar['kullanici'] ?? 0);
+        if ($kullaniciId <= 0) return;
+
+        require_once dirname(__DIR__) . '/admin/includes/DestekHelper.php';
+        if (!DestekHelper::aktifMi() || !DestekHelper::kullaniciAta($kullaniciId)) {
+            error_log("cronHataTalebiAc: Destek API kapalı veya kullanıcı #{$kullaniciId} e-postasız (log #{$logId}).");
+            return;
+        }
+
+        $zamanlama = $log['zamanlamaAd'] ?: 'Zamanlayıcısız çalıştırma (URL / CLI)';
+        $konu      = mb_substr("Cron hatası: {$log['gorevAd']} » {$zamanlama}", 0, 200);
+        $mesaj     = "Zamanlanmış bir görev hata ile sonuçlandı.\n\n"
+                   . "Görev: {$log['gorevAd']} ({$log['gorevKodu']})\n"
+                   . "Zamanlayıcı: {$zamanlama}\n"
+                   . "Başlangıç: {$log['baslangic']}\n"
+                   . 'Parametreler: ' . ($log['params'] ?: '-') . "\n\n"
+                   . "Hata / sonuç:\n" . mb_substr($sonuc, 0, 2000) . "\n\n"
+                   . "Çalışma log no: #{$logId} (Cron Yönetimi → Çalışma Logları)\n\n"
+                   . "Aynı görev için 24 saat içinde yeni talep açılmaz. Cron hata takibi tarafından otomatik açılmıştır.";
+
+        $r        = DestekHelper::olustur($konu, $mesaj, (int)($ayar['kategori'] ?? 0), (int)($ayar['oncelik'] ?? 0));
+        $ticketId = ($r['success'] ?? false) ? (int)($r['data']['ticket_id'] ?? 0) : 0;
+        if (!($r['success'] ?? false)) {
+            error_log("cronHataTalebiAc: talep yanıtı hatalı (log #{$logId}): " . ($r['message'] ?? '-'));
+        }
+
+        // Hatalı yanıtta da işaretlenir: talep açılmış olabilir, her çalışmada tekrar denenmesin
+        $db->update('CronCalismaLog', ['CronCalismaLog_TalepId' => $ticketId], ['CronCalismaLog_Id' => $logId]);
+    } catch (Throwable $e) {
+        error_log('cronHataTalebiAc: ' . $e->getMessage());
+    }
 }
 
 // ─── IRIS yardımcıları ────────────────────────────────────────────────────────
@@ -622,6 +702,40 @@ function irisWebTokenYenile($db, int $personelId): array
     }
 }
 
+/**
+ * Seçili ana bayilerin IRIS şifresini dener (Token Güncelle sonunda çalışır).
+ * $secim: "*" = tüm aktif ana bayiler, "1,3" = yalnız bu Id'ler (pasif olsa da denenir).
+ * Çıktıya satır basar → ['ozet' => string, 'basarili' => int, 'hatali' => int]
+ */
+function anaBayiSifreKontrol($db, string $secim): array
+{
+    require_once dirname(__DIR__) . '/admin/includes/IrisTalepServisi.php';
+
+    if ($secim === '*') {
+        $bayiler = $db->fetchAll("SELECT DigiturkAnaBayiler_Id AS id FROM DigiturkAnaBayiler WHERE Durum = 1 ORDER BY DigiturkAnaBayiler_Id") ?: [];
+    } else {
+        $idler   = array_values(array_unique(array_filter(array_map('intval', explode(',', $secim)))));
+        $bayiler = $idler ? ($db->fetchAll("SELECT DigiturkAnaBayiler_Id AS id FROM DigiturkAnaBayiler
+            WHERE DigiturkAnaBayiler_Id IN (" . implode(',', array_fill(0, count($idler), '?')) . ")
+            ORDER BY DigiturkAnaBayiler_Id", $idler) ?: []) : [];
+    }
+    if (!$bayiler) return ['ozet' => 'Ana bayi şifre: kontrol edilecek ana bayi bulunamadı', 'basarili' => 0, 'hatali' => 0];
+
+    $ok = $hata = $bos = 0;
+    $hatalar = [];
+
+    foreach ($bayiler as $b) {
+        $t = irisAnaBayiSifreTest($db, (int)$b['id'], 'Token Güncelle (ana bayi şifre kontrolü)');
+        if ($t['basarili'])     { $ok++;  echo "  ✓ Ana bayi #{$b['id']} {$t['mesaj']}\n"; }
+        elseif ($t['atlandi'])  { $bos++; echo "  ⏭ Ana bayi #{$b['id']} {$t['mesaj']}\n"; }
+        else                    { $hata++; $hatalar[] = "#{$b['id']} {$t['mesaj']}"; echo "  ✗ Ana bayi #{$b['id']} {$t['mesaj']}\n"; }
+    }
+
+    $ozet = "Ana bayi şifre: {$ok} başarılı, {$hata} hatalı" . ($bos ? ", {$bos} bilgisi eksik" : '');
+    if ($hatalar) $ozet .= ' (' . implode('; ', $hatalar) . ')';
+    return ['ozet' => $ozet, 'basarili' => $ok, 'hatali' => $hata];
+}
+
 // ─── Görev fonksiyonları ─────────────────────────────────────────────────────
 /**
  * Token Güncelle
@@ -634,8 +748,12 @@ function irisWebTokenYenile($db, int $personelId): array
  * Sıralama: sağlam personel önce, son login'i hatalı olanlar sona. Böylece şifresi
  * dolmuş hesaplar sağlam hesapların önünde login harcayamaz.
  *
+ * Son adımda seçili ana bayilerin IRIS şifresi denenir (anaBayiSifreKontrol).
+ *
  * Parametreler:
- *   zorla : 1 → token süresine bakmadan tümünü yeniler (kilitler yine uygulanır)
+ *   zorla           : 1 → token süresine bakmadan tümünü yeniler (kilitler yine uygulanır)
+ *   ana_bayiler     : şifresi denenecek ana bayi Id'leri ("1,3"), "*" = tüm aktifler, boş = denenmez
+ *   sadece_ana_bayi : 1 → personel / IRIS web token adımları atlanır, yalnız ana bayi şifreleri denenir
  */
 function gorevTokenGuncelle(array $params, $db): array
 {
@@ -650,6 +768,19 @@ function gorevTokenGuncelle(array $params, $db): array
     $zorla = !empty($params['zorla']);
     // Seçim filtresiyle aynı pay: bitimine 2 saatten az kalan token yenilenir
     $payDk = 120;
+
+    $anaSecim  = trim((string)($params['ana_bayiler'] ?? ''));
+    $sadeceAna = !empty($params['sadece_ana_bayi']);
+
+    if ($sadeceAna) {
+        try {
+            if ($anaSecim === '') throw new RuntimeException('"Sadece ana bayi kontrolü" seçili ama ana bayi seçilmemiş.');
+            $k = anaBayiSifreKontrol($db, $anaSecim);
+            $sonuc = $k['ozet'];
+            $durum = ($k['hatali'] > 0 || $k['basarili'] === 0) ? 2 : 1;
+        } catch (Throwable $e) { $sonuc = get_class($e) . ': ' . $e->getMessage(); $durum = 2; }
+        return ['durum' => $durum, 'sonuc' => $sonuc, 'cikti' => ob_get_clean()];
+    }
 
     try {
         $personeller = $db->fetchAll("
@@ -671,6 +802,7 @@ function gorevTokenGuncelle(array $params, $db): array
             $iris = irisWebTokenYenile($db, IRIS_PERSONEL_ID);
             echo ($iris['durum'] === 1 ? '  ✓ ' : '  ✗ ') . $iris['mesaj'] . "\n";
             $sonuc = ($zorla ? 'Aktif personel bulunamadı.' : 'Yenilenmesi gereken token yok.') . ' | ' . $iris['mesaj'];
+            if ($anaSecim !== '') $sonuc .= ' | ' . anaBayiSifreKontrol($db, $anaSecim)['ozet'];
             return ['durum' => $zorla ? 2 : 1, 'sonuc' => $sonuc, 'cikti' => ob_get_clean()];
         }
 
@@ -710,6 +842,9 @@ function gorevTokenGuncelle(array $params, $db): array
         $iris = irisWebTokenYenile($db, IRIS_PERSONEL_ID);
         echo ($iris['durum'] === 1 ? '  ✓ ' : '  ✗ ') . $iris['mesaj'] . "\n";
         $sonuc .= ' | ' . $iris['mesaj'];
+
+        // Ana bayi IRIS şifreleri — hata görev durumunu etkilemez, şifre hatası bildirim üretir
+        if ($anaSecim !== '') $sonuc .= ' | ' . anaBayiSifreKontrol($db, $anaSecim)['ozet'];
 
         $durum = ($hatali > 0 && $basarili === 0) ? 2 : 1;
     } catch (Throwable $e) { $sonuc = get_class($e) . ': ' . $e->getMessage(); $durum = 2; }
