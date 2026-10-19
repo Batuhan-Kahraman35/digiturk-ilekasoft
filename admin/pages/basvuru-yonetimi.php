@@ -1843,7 +1843,8 @@ $dagitLeadFormlari = $db->fetchAll("
             f.ReklamLeadFormlari_FormAdi,
             CASE WHEN s.ReklamFacebookSayfalari_SayfaAdi IS NOT NULL
                  THEN CONCAT(' — ', s.ReklamFacebookSayfalari_SayfaAdi) ELSE '' END
-        ) AS ad
+        ) AS ad,
+        NULLIF(LTRIM(RTRIM(CAST(f.ReklamLeadFormlari_FormID AS NVARCHAR(100)))), '') AS form_id
     FROM ReklamLeadFormlari f
     LEFT JOIN ReklamFacebookSayfalari s ON s.ReklamFacebookSayfalari_id = f.ReklamLeadFormlari_Sayfa_id
     WHERE EXISTS (
@@ -2014,7 +2015,7 @@ $dagitLeadFormlari = $db->fetchAll("
                                     <select class="form-select" name="lead_formu[]" id="filter_lead_formu" multiple data-placeholder="Tümü">
                                         <option value="yok">Yok (reklamdan gelmeyen)</option>
                                         <?php foreach ($dagitLeadFormlari as $lf): ?>
-                                        <option value="<?= (int)$lf['id'] ?>"><?= htmlspecialchars($lf['ad']) ?></option>
+                                        <option value="<?= (int)$lf['id'] ?>"><?= htmlspecialchars($lf['ad'] . (!empty($lf['form_id']) ? ' (Form ID: ' . $lf['form_id'] . ')' : '')) ?></option>
                                         <?php endforeach; ?>
                                     </select>
                                 </div>
