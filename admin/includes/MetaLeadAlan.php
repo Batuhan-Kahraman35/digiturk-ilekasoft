@@ -49,6 +49,122 @@ function alanlariAyikla(array $fieldData): array
 }
 
 /**
+ * Meta sorusunun varsayılan türünü tahmin eder.
+ * Dönüş: adsoyad | isim | soyisim | telefon | email | null (null → Açıklama)
+ */
+function alanTuruTahmin(string $key, string $type = ''): ?string
+{
+    $type = strtoupper($type);
+    $k    = mb_strtolower($key);
+    if ($type === 'FULL_NAME' || $k === 'full_name' || preg_match('/ad[ıi]?(n[ıi]z)?_?soyad/u', $k)) return 'adsoyad';
+    if ($type === 'FIRST_NAME' || $k === 'first_name') return 'isim';
+    if ($type === 'LAST_NAME'  || $k === 'last_name')  return 'soyisim';
+    if ($type === 'PHONE' || $k === 'phone_number' || str_contains($k, 'phone') || str_contains($k, 'telefon')) return 'telefon';
+    if ($type === 'EMAIL' || $k === 'email' || str_contains($k, 'mail')) return 'email';
+    return null;
+}
+
+/**
+ * Formun Meta sorularını ReklamLeadFormAlanlari ile senkronlar ve varsayılan eşlemeyi yazar.
+ *
+ * - Yeni soru: varsayılan hedefle eklenir (ad soyad / telefon / e-posta kendi alanına,
+ *   kalanlar çoklu kabul eden alana — Açıklama).
+ * - Hiç eşlemesi olmayan form: mevcut boş satırlar da varsayılanla doldurulur.
+ * - Eşlemesi olan formda mevcut seçimlere dokunulmaz.
+ * - Meta'dan kaybolan sorular pasife alınır (eşleme silinmez).
+ *
+ * $tamListe = false (web formu): yalnız yeni sorular eklenir; mevcut satırlara ve
+ * listede olmayan sorulara dokunulmaz (her başvuru tüm soruları göndermeyebilir).
+ *
+ * Panel (Alan Eşleme modalı), webhook (yeni formdan ilk lead) ve web başvuru formu ortak kullanır.
+ */
+function formAlanlariSenkronla(Database $db, int $fid, array $sorular, int $kullaniciId, bool $tamListe = true): void
+{
+    $simdi = date('Y-m-d H:i:s');
+
+    // Tür → hedef kolon (katalogdan)
+    $hedef = ['adsoyad' => null, 'isim' => null, 'soyisim' => null, 'telefon' => null, 'email' => null, 'coklu' => null];
+    foreach ($db->fetchAll("
+        SELECT tanim_BasvuruHedefAlanlari_Kolon      AS kolon,
+               tanim_BasvuruHedefAlanlari_Tip        AS tip,
+               tanim_BasvuruHedefAlanlari_CokluKabul AS coklu
+        FROM tanim_BasvuruHedefAlanlari
+        WHERE Durum = 1
+        ORDER BY tanim_BasvuruHedefAlanlari_Sira
+    ") as $h) {
+        $kolon = (string)$h['kolon'];
+        if ((int)$h['coklu'] === 1) { $hedef['coklu'] = $hedef['coklu'] ?: $kolon; continue; }
+        if (in_array($h['tip'], ['adsoyad', 'telefon'], true)) $hedef[$h['tip']] = $hedef[$h['tip']] ?: $kolon;
+        elseif (in_array(strtolower($kolon), ['isim', 'soyisim', 'email'], true)) $hedef[strtolower($kolon)] = $kolon;
+    }
+
+    $eslemeVar  = false;
+    $kullanilan = [];
+    foreach ($db->fetchAll("
+        SELECT DISTINCT ReklamLeadFormAlanlari_HedefKolon AS kolon FROM ReklamLeadFormAlanlari
+        WHERE ReklamLeadFormAlanlari_Form_id = ? AND ReklamLeadFormAlanlari_HedefKolon IS NOT NULL
+    ", [$fid]) as $k) { $eslemeVar = true; $kullanilan[$k['kolon']] = true; }
+
+    // Tek alan kabul eden hedef bir kez verilir (2. telefon sorusu Açıklama'ya düşer)
+    $varsayilan = function (array $q) use ($hedef, &$kullanilan) {
+        $tur  = alanTuruTahmin((string)($q['key'] ?? ''), (string)($q['type'] ?? ''));
+        $aday = $tur ? $hedef[$tur] : null;
+        if ($aday && empty($kullanilan[$aday])) { $kullanilan[$aday] = true; return $aday; }
+        return $hedef['coklu'];
+    };
+
+    $gelenler = [];
+    foreach ($sorular as $q) {
+        $alanAdi = trim((string)($q['key'] ?? ''));
+        if ($alanAdi === '') continue;
+        $gelenler[] = $alanAdi;
+        $soru = mb_substr((string)($q['label'] ?? ''), 0, 400);
+
+        $var = $db->fetchOne("
+            SELECT ReklamLeadFormAlanlari_id, ReklamLeadFormAlanlari_HedefKolon FROM ReklamLeadFormAlanlari
+            WHERE ReklamLeadFormAlanlari_Form_id = ? AND ReklamLeadFormAlanlari_MetaAlanAdi = ?
+        ", [$fid, $alanAdi]);
+
+        if ($var && !$tamListe) continue;
+
+        if ($var) {
+            // Soru metni değişmiş olabilir; eşleme korunur
+            $guncel = [
+                'ReklamLeadFormAlanlari_MetaSoru' => $soru,
+                'Durum'                           => 1,
+                'GuncelleyenKullanici'            => $kullaniciId,
+                'GuncellemeTarihi'                => $simdi,
+            ];
+            if (!$eslemeVar && $var['ReklamLeadFormAlanlari_HedefKolon'] === null) {
+                $guncel['ReklamLeadFormAlanlari_HedefKolon'] = $varsayilan($q);
+            }
+            $db->update('ReklamLeadFormAlanlari', $guncel, ['ReklamLeadFormAlanlari_id' => $var['ReklamLeadFormAlanlari_id']]);
+        } else {
+            $db->insert('ReklamLeadFormAlanlari', [
+                'ReklamLeadFormAlanlari_Form_id'     => $fid,
+                'ReklamLeadFormAlanlari_MetaAlanAdi' => $alanAdi,
+                'ReklamLeadFormAlanlari_MetaSoru'    => $soru,
+                'ReklamLeadFormAlanlari_HedefKolon'  => $varsayilan($q),
+                'ReklamLeadFormAlanlari_Sira'        => 0,
+                'OlusturanKullanici'                 => $kullaniciId,
+                'OlusturmaTarihi'                    => $simdi,
+                'Durum'                              => 1,
+            ]);
+        }
+    }
+
+    if ($gelenler && $tamListe) {
+        $yer = implode(',', array_fill(0, count($gelenler), '?'));
+        $db->execute("
+            UPDATE ReklamLeadFormAlanlari SET Durum = 0,
+                   GuncelleyenKullanici = ?, GuncellemeTarihi = ?
+            WHERE ReklamLeadFormAlanlari_Form_id = ?
+              AND ReklamLeadFormAlanlari_MetaAlanAdi NOT IN ($yer)
+        ", array_merge([$kullaniciId, $simdi, $fid], $gelenler));
+    }
+}
+
+/**
  * Form bazlı alan eşlemesiyle Basvurular kolonlarını üretir.
  *
  * ReklamLeadFormAlanlari'nda bu form için eşleme tanımlıysa o kullanılır;
@@ -91,10 +207,16 @@ function alanlariEsle(Database $db, ?int $formFk, array $fieldData): array
         ", [$formFk]);
     }
 
-    // Eşleme tanımlı değilse eski otomatik tahmin
+    // Eşleme tanımlı değilse eski otomatik tahmin; tanınmayan sorular Açıklama'ya
     if (!$eslemeler) {
         $a = alanlariAyikla($fieldData);
+        $aciklama = [];
+        foreach ($gelen as $ad => $deger) {
+            if (trim($deger) === '' || alanTuruTahmin($ad) !== null) continue;
+            $aciklama[] = trim(str_replace('_', ' ', $ad)) . ': ' . trim($deger);
+        }
         return array_merge($bos, [
+            'Basvuru_Aciklama'   => $aciklama ? mb_substr(implode("\n", $aciklama), 0, 500) : null,
             'Isim'               => $a['isim'],
             'Soyisim'            => $a['soyisim'],
             'email'              => $a['email'],
@@ -159,4 +281,34 @@ function alanlariEsle(Database $db, ?int $formFk, array $fieldData): array
         : null;
 
     return $veri;
+}
+
+/**
+ * Web başvuru formundan gelen alanları form eşlemesiyle işler.
+ *
+ * $alanlar: [['key' => 'sehir', 'label' => 'Şehir', 'value' => 'İstanbul'], ...]
+ * Form biliniyorsa yeni sorular ReklamLeadFormAlanlari'na varsayılan hedefle eklenir
+ * (panelde Alan Eşleme modalında görünür ve değiştirilebilir). Form başına satır
+ * sayısı sınırlıdır; dış kaynaktan sınırsız soru kaydı açılamaz.
+ * Dönen dizi alanlariEsle() çıktısıdır (Basvurular kolonları).
+ */
+function webFormAlanlariniIsle(Database $db, ?int $formFk, array $alanlar, int $kullaniciId): array
+{
+    $sorular = []; $fieldData = [];
+    foreach ($alanlar as $a) {
+        $key = trim((string)($a['key'] ?? ''));
+        if ($key === '') continue;
+        $sorular[]   = ['key' => $key, 'label' => (string)($a['label'] ?? '') ?: $key];
+        $fieldData[] = ['name' => $key, 'values' => [(string)($a['value'] ?? '')]];
+    }
+
+    if ($formFk && $sorular) {
+        $adet = (int)($db->fetchOne(
+            "SELECT COUNT(*) AS adet FROM ReklamLeadFormAlanlari WHERE ReklamLeadFormAlanlari_Form_id = ?",
+            [$formFk]
+        )['adet'] ?? 0);
+        if ($adet < 30) formAlanlariSenkronla($db, $formFk, $sorular, $kullaniciId, false);
+    }
+
+    return alanlariEsle($db, $formFk, $fieldData);
 }

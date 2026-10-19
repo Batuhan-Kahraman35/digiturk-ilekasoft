@@ -867,60 +867,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                     if ($r['ok']) {
                         $sorular = $r['data']['questions'] ?? [];
-                        $simdi   = date('Y-m-d H:i:s');
-                        $gelenler = [];
-
-                        foreach ($sorular as $q) {
-                            $alanAdi = trim((string)($q['key'] ?? ''));
-                            if ($alanAdi === '') continue;
-                            $gelenler[] = $alanAdi;
-                            $soru = mb_substr((string)($q['label'] ?? ''), 0, 400);
-
-                            $var = $db->fetchOne("
-                                SELECT ReklamLeadFormAlanlari_id FROM ReklamLeadFormAlanlari
-                                WHERE ReklamLeadFormAlanlari_Form_id = ? AND ReklamLeadFormAlanlari_MetaAlanAdi = ?
-                            ", [$fid, $alanAdi]);
-
-                            if ($var) {
-                                // Soru metni değişmiş olabilir; eşleme korunur
-                                $db->update('ReklamLeadFormAlanlari', [
-                                    'ReklamLeadFormAlanlari_MetaSoru' => $soru,
-                                    'Durum'                           => 1,
-                                    'GuncelleyenKullanici'            => $user['kullanici_id'],
-                                    'GuncellemeTarihi'                => $simdi,
-                                ], ['ReklamLeadFormAlanlari_id' => $var['ReklamLeadFormAlanlari_id']]);
-                            } else {
-                                $db->insert('ReklamLeadFormAlanlari', [
-                                    'ReklamLeadFormAlanlari_Form_id'     => $fid,
-                                    'ReklamLeadFormAlanlari_MetaAlanAdi' => $alanAdi,
-                                    'ReklamLeadFormAlanlari_MetaSoru'    => $soru,
-                                    'ReklamLeadFormAlanlari_HedefKolon'  => null,
-                                    'ReklamLeadFormAlanlari_Sira'        => 0,
-                                    'OlusturanKullanici'                 => $user['kullanici_id'],
-                                    'OlusturmaTarihi'                    => $simdi,
-                                    'Durum'                              => 1,
-                                ]);
-                            }
-                        }
-
-                        // Meta'dan kaybolan alanlar pasife alınır (eşleme silinmez)
-                        if ($gelenler) {
-                            $yer = implode(',', array_fill(0, count($gelenler), '?'));
-                            $db->execute("
-                                UPDATE ReklamLeadFormAlanlari SET Durum = 0,
-                                       GuncelleyenKullanici = ?, GuncellemeTarihi = ?
-                                WHERE ReklamLeadFormAlanlari_Form_id = ?
-                                  AND ReklamLeadFormAlanlari_MetaAlanAdi NOT IN ($yer)
-                            ", array_merge([$user['kullanici_id'], $simdi, $fid], $gelenler));
-                        }
+                        // Soru senkronu + varsayılan eşleme (webhook ile ortak)
+                        require_once __DIR__ . '/../includes/MetaLeadAlan.php';
+                        formAlanlariSenkronla($db, $fid, $sorular, (int)$user['kullanici_id']);
                     } else {
                         $metaHata = mtHataMesaji($r);
                     }
-                } elseif (!$kanal) {
+                } elseif ($formId !== '' && !$kanal) {
                     $metaHata = 'Aktif Meta kanalı bulunamadı.';
-                } else {
-                    $metaHata = 'Formun Meta form ID bilgisi yok.';
                 }
+                // Meta form ID'si olmayan form = web formu (sorular ilk başvuruyla veya elle eklenir)
+                $webForm = ($formId === '');
 
                 $alanlar = $db->fetchAll("
                     SELECT ReklamLeadFormAlanlari_id         AS id,
@@ -957,7 +914,38 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'sayfa_id'  => $sayfaFk,
                     'birimler'  => $birimler,
                     'meta_hata' => $metaHata,
+                    'web_form'  => $webForm,
                 ]]);
+                break;
+
+            // ── Web formuna elle soru ekle (ilk başvurudan önce eşleme hazırlamak için) ──
+            case 'form_alani_ekle':
+                if (!$permissions['can_edit']) { echo json_encode(['success' => false, 'message' => 'Düzenleme yetkiniz yok.']); break; }
+
+                $fid   = (int)($_POST['id'] ?? 0);
+                $key   = mb_strtolower(trim((string)($_POST['alan'] ?? '')));
+                $etk   = mb_substr(trim((string)($_POST['soru'] ?? '')), 0, 200);
+                if ($fid <= 0) { echo json_encode(['success' => false, 'message' => 'Form seçilmedi.']); break; }
+                if (!preg_match('/^[\p{L}\p{N}_?-]{1,60}$/u', $key)) {
+                    echo json_encode(['success' => false, 'message' => 'Alan adı yalnız harf, rakam ve alt çizgi içerebilir (en fazla 60 karakter).']); break;
+                }
+
+                $form = $db->fetchOne("SELECT ReklamLeadFormlari_Sayfa_id, ReklamLeadFormlari_FormID FROM ReklamLeadFormlari WHERE ReklamLeadFormlari_id = ?", [$fid]);
+                if (!$form) { echo json_encode(['success' => false, 'message' => 'Form bulunamadı.']); break; }
+                if (preg_replace('/[^0-9]/', '', (string)$form['ReklamLeadFormlari_FormID']) !== '') {
+                    echo json_encode(['success' => false, 'message' => 'Meta formlarının soruları Meta\'dan çekilir, elle eklenemez.']); break;
+                }
+                if ($birimKisitli && !empty($form['ReklamLeadFormlari_Sayfa_id'])
+                    && !sayfaKayitBirimYetkiliMi($db, $izinliBirimler, (int)$form['ReklamLeadFormlari_Sayfa_id'])) {
+                    echo json_encode(['success' => false, 'message' => 'Bu formun sayfası için yetkiniz yok.']); break;
+                }
+                if ($db->fetchOne("SELECT 1 AS v FROM ReklamLeadFormAlanlari WHERE ReklamLeadFormAlanlari_Form_id = ? AND ReklamLeadFormAlanlari_MetaAlanAdi = ?", [$fid, $key])) {
+                    echo json_encode(['success' => false, 'message' => 'Bu alan adı formda zaten var.']); break;
+                }
+
+                require_once __DIR__ . '/../includes/MetaLeadAlan.php';
+                formAlanlariSenkronla($db, $fid, [['key' => $key, 'label' => $etk ?: $key]], (int)$user['kullanici_id'], false);
+                echo json_encode(['success' => true, 'message' => 'Soru eklendi.']);
                 break;
 
             // ── Lead formu alan eşlemesini kaydet ───────────────────────────
@@ -1036,12 +1024,48 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     }
                 }
 
+                // Geriye dönük doldurma ayrı istekte parça parça yapılır (form_geri_doldur);
+                // tek istekte yüzlerce Graph çağrısı IIS FastCGI zaman aşımına düşüyordu.
+                $geriSay = $db->fetchOne("
+                    SELECT COUNT(*) AS adet
+                    FROM Basvurular
+                    WHERE ReklamLeadFormlari_ID = ?
+                      AND Basvurular_LeadgenID IS NOT NULL
+                      AND OlusturmaTarihi >= DATEADD(DAY, -90, GETDATE())
+                ", [$fid]);
+
+                echo json_encode([
+                    'success'    => true,
+                    'message'    => $guncellenen . ' alan eşlemesi kaydedildi.',
+                    'geri_toplam'=> min(1000, (int)($geriSay['adet'] ?? 0)),
+                ]);
+                break;
+
+            case 'form_geri_doldur':
+                if (!$permissions['can_edit']) { echo json_encode(['success' => false, 'message' => 'Düzenleme yetkiniz yok.']); break; }
+
+                $fid    = (int)($_POST['id'] ?? 0);
+                $offset = max(0, (int)($_POST['offset'] ?? 0));
+                $limit  = 25;
+                if ($fid <= 0 || $offset >= 1000) { echo json_encode(['success' => false, 'message' => 'Geçersiz istek.']); break; }
+
+                $form = $db->fetchOne("SELECT ReklamLeadFormlari_Sayfa_id FROM ReklamLeadFormlari WHERE ReklamLeadFormlari_id = ?", [$fid]);
+                if (!$form) { echo json_encode(['success' => false, 'message' => 'Form bulunamadı.']); break; }
+                if ($birimKisitli && !empty($form['ReklamLeadFormlari_Sayfa_id'])
+                    && !sayfaKayitBirimYetkiliMi($db, $izinliBirimler, (int)$form['ReklamLeadFormlari_Sayfa_id'])) {
+                    echo json_encode(['success' => false, 'message' => 'Bu formun sayfası için yetkiniz yok.']); break;
+                }
+
+                // Uzun Graph çağrıları sırasında oturum kilidini tutma
+                if (session_status() === PHP_SESSION_ACTIVE) session_write_close();
+
                 // ── Geriye dönük doldurma ───────────────────────────────────
                 // Eşleme kaydedilince bu formun son 90 gündeki lead'leri Meta'dan
                 // yeniden çekilip eşlenmiş kolonların üzerine yazılır.
                 // (Meta lead verisini ~90 gün sonra siler; daha eskiler atlanır.)
                 require_once __DIR__ . '/../includes/MetaLeadAlan.php';
 
+                $simdi = date('Y-m-d H:i:s');
                 $geri  = ['kayit' => 0, 'guncellenen' => 0, 'veriYok' => 0, 'hata' => 0];
                 $kanal = mtMetaKanal($db);
 
@@ -1075,16 +1099,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $tk      = trim((string)($sayfaTk['tk'] ?? '')) ?: (string)$kanal['Token'];
 
                     $kayitlar = $db->fetchAll("
-                        SELECT TOP 1000 Basvurular_id, Basvurular_LeadgenID
+                        SELECT Basvurular_id, Basvurular_LeadgenID
                         FROM Basvurular
                         WHERE ReklamLeadFormlari_ID = ?
                           AND Basvurular_LeadgenID IS NOT NULL
                           AND OlusturmaTarihi >= DATEADD(DAY, -90, GETDATE())
                         ORDER BY Basvurular_id DESC
+                        OFFSET " . $offset . " ROWS FETCH NEXT " . $limit . " ROWS ONLY
                     ", [$fid]);
 
                     $geri['kayit'] = count($kayitlar);
-                    if ($kayitlar) @set_time_limit(0);
 
                     foreach ($kayitlar as $kyt) {
                         $lg = (string)$kyt['Basvurular_LeadgenID'];
@@ -1115,14 +1139,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     }
                 }
 
-                $mesaj = $guncellenen . ' alan eşlemesi kaydedildi.';
-                if ($geri['kayit'] > 0) {
-                    $mesaj .= ' Geçmiş başvurular: ' . $geri['guncellenen'] . '/' . $geri['kayit'] . ' güncellendi';
-                    if ($geri['veriYok']) $mesaj .= ', ' . $geri['veriYok'] . ' kaydın verisi Meta tarafında yok';
-                    if ($geri['hata'])    $mesaj .= ', ' . $geri['hata'] . ' hata';
-                    $mesaj .= '.';
-                }
-                echo json_encode(['success' => true, 'message' => $mesaj, 'geri' => $geri]);
+                echo json_encode(['success' => true, 'geri' => $geri, 'limit' => $limit]);
                 break;
 
             // ── Birim yetkileri (junction) ──────────────────────────────────
@@ -1944,6 +1961,9 @@ $canDel  = $permissions['can_delete'] ? 'true' : 'false';
                 <tbody id="aeSatirlar"></tbody>
             </table>
         </div>
+        <div class="text-end mt-2 d-none" id="aeSoruEkleKutu">
+            <button type="button" class="btn btn-sm btn-outline-primary" onclick="aeSoruEkle()"><i class="bi bi-plus"></i> Soru Ekle</button>
+        </div>
         <?php if (!$birimKisitli): ?>
         <hr class="my-3">
         <div class="d-flex justify-content-between align-items-center mb-2">
@@ -2671,6 +2691,30 @@ function sil(ent, id, ad) {
 
 // ── Lead Formu Alan Eşleme ──────────────────────────────────────────────────
 let AE_HEDEFLER = [];
+let AE_WEB_FORM = false;
+
+function aeSoruEkle() {
+    Swal.fire({
+        title: 'Soru Ekle',
+        html: `<input id="aeYeniAlan" class="swal2-input" placeholder="Alan adı (ör. sehir)" maxlength="60">
+               <input id="aeYeniSoru" class="swal2-input" placeholder="Soru metni (ör. Şehir)" maxlength="200">`,
+        showCancelButton: true, confirmButtonText: 'Ekle', cancelButtonText: 'Vazgeç',
+        preConfirm: () => {
+            const alan = $('#aeYeniAlan').val().trim();
+            if (!alan) { Swal.showValidationMessage('Alan adı zorunlu.'); return false; }
+            return { alan: alan, soru: $('#aeYeniSoru').val().trim() };
+        }
+    }).then(res => {
+        if (!res.isConfirmed) return;
+        const formId = $('#aeFormId').val();
+        $.post(pageUrl, { action: 'form_alani_ekle', id: formId, alan: res.value.alan, soru: res.value.soru }, function (r) {
+            if (!r.success) { Swal.fire('Hata', r.message, 'error'); return; }
+            Swal.fire({ icon: 'success', title: r.message, timer: 1000, showConfirmButton: false });
+            bootstrap.Modal.getInstance(document.getElementById('modalAlanEsleme')).hide();
+            setTimeout(() => alanEslemeAc(formId), 400);
+        }, 'json').fail(() => Swal.fire('Hata', 'Sunucu hatası.', 'error'));
+    });
+}
 
 function alanEslemeAc(formId) {
     $('#aeSatirlar').html('<tr><td colspan="4" class="text-center text-muted py-3">Meta sorguları çekiliyor…</td></tr>');
@@ -2699,6 +2743,14 @@ function alanEslemeAc(formId) {
                 Meta'dan güncel sorular çekilemedi: ${enc(d.meta_hata)}<br>
                 Aşağıda daha önce kaydedilmiş alanlar gösteriliyor.</div>`);
         }
+        AE_WEB_FORM = !!d.web_form;
+        if (AE_WEB_FORM) {
+            $('#aeUyari').html(`<div class="alert alert-info py-2 px-3 small mb-2">
+                <i class="bi bi-globe me-1"></i>
+                Web formu: sorular ilk başvuruyla otomatik eklenir (ad soyad ve telefon kendi alanına, diğerleri Açıklama'ya).
+                Henüz başvuru gelmediyse <strong>Soru Ekle</strong> ile önceden ekleyip eşleyebilirsiniz.</div>`);
+        }
+        $('#aeSoruEkleKutu').toggleClass('d-none', !(AE_WEB_FORM && CAN.edit));
 
         alanEslemeSatirlariCiz(d.alanlar || []);
     }, 'json').fail(function () {
@@ -2795,7 +2847,7 @@ function alanEslemeKaydet() {
 
     Swal.fire({
         title: 'Kaydediliyor',
-        html: 'Eşleme yazılıyor, geçmiş başvurular Meta\'dan yeniden çekiliyor…<br><small class="text-muted">Kayıt sayısına göre bir kaç dakika sürebilir.</small>',
+        html: '<span id="aeIlerleme">Eşleme yazılıyor…</span><br><small class="text-muted">Geçmiş başvurular Meta\'dan parça parça yeniden çekilir.</small>',
         allowOutsideClick: false, allowEscapeKey: false,
         didOpen: () => Swal.showLoading()
     });
@@ -2809,10 +2861,37 @@ function alanEslemeKaydet() {
         if (!r.success) { Swal.fire('Hata', r.message || 'Kaydedilemedi.', 'error'); return; }
         bootstrap.Modal.getInstance(document.getElementById('modalAlanEsleme')).hide();
         listele('form');
-        Swal.fire({ icon: 'success', title: 'Kaydedildi', text: r.message });
+        const toplam = parseInt(r.geri_toplam || 0, 10);
+        if (toplam <= 0) { Swal.fire({ icon: 'success', title: 'Kaydedildi', text: r.message }); return; }
+        aeGeriDoldur(formId, toplam, r.message);
     }, 'json').fail(function () {
         Swal.fire('Hata', 'Sunucu hatası.', 'error');
     });
+}
+function aeGeriDoldur(formId, toplam, eslemeMesaj) {
+    const ozet = { kayit: 0, guncellenen: 0, veriYok: 0, hata: 0 };
+
+    const bitir = function (yarida) {
+        let mesaj = eslemeMesaj + ' Geçmiş başvurular: ' + ozet.guncellenen + '/' + ozet.kayit + ' güncellendi';
+        if (ozet.veriYok) mesaj += ', ' + ozet.veriYok + ' kaydın verisi Meta tarafında yok';
+        if (ozet.hata)    mesaj += ', ' + ozet.hata + ' hata';
+        mesaj += '.';
+        if (yarida) Swal.fire({ icon: 'warning', title: 'Eşleme kaydedildi', text: mesaj + ' Geçmiş doldurma yarıda kaldı; tekrar Kaydet ile devam edebilirsiniz.' });
+        else        Swal.fire({ icon: 'success', title: 'Kaydedildi', text: mesaj });
+    };
+
+    const parca = function (offset) {
+        $('#aeIlerleme').text('Geçmiş başvurular güncelleniyor: ' + offset + ' / ' + toplam);
+        $.post(pageUrl, { action: 'form_geri_doldur', id: formId, offset: offset }, function (r) {
+            if (!r.success) { bitir(true); return; }
+            const g = r.geri || {};
+            ['kayit', 'guncellenen', 'veriYok', 'hata'].forEach(k => ozet[k] += parseInt(g[k] || 0, 10));
+            const sonraki = offset + (r.limit || 25);
+            if ((g.kayit || 0) < (r.limit || 25) || sonraki >= toplam) { bitir(false); return; }
+            parca(sonraki);
+        }, 'json').fail(function () { bitir(true); });
+    };
+    parca(0);
 }
 </script>
 </body>

@@ -213,6 +213,32 @@ foreach (($payload['entry'] ?? []) as $entry) {
             $formFk = $f['ReklamLeadFormlari_id'] ?? null;
         }
 
+        // Form için hiç alan satırı yoksa (yeni form) soruları çekip varsayılan eşlemeyi kur:
+        // ad soyad / telefon / e-posta kendi alanına, kalanlar Açıklama'ya
+        if ($formFk) {
+            $alanVar = $db->fetchOne(
+                "SELECT TOP 1 ReklamLeadFormAlanlari_id FROM ReklamLeadFormAlanlari WHERE ReklamLeadFormAlanlari_Form_id = ?",
+                [$formFk]
+            );
+            if (!$alanVar) {
+                $rq = graphGet(rtrim((string)$kaynak['BaseURL'], '/') . '/' . $gercekFormId . '?' . http_build_query([
+                    'fields'          => 'questions{key,label,type}',
+                    'access_token'    => $pageToken,
+                    'appsecret_proof' => appProof($pageToken, (string)$kaynak['AppSecret']),
+                ]));
+                if ($rq['ok'] && !empty($rq['data']['questions'])) {
+                    try {
+                        formAlanlariSenkronla($db, (int)$formFk, $rq['data']['questions'], META_SISTEM_KULLANICI);
+                        whLog("Varsayilan alan eslemesi olusturuldu form=$formFk");
+                    } catch (Throwable $e) {
+                        whLog("Varsayilan esleme HATA form=$formFk " . $e->getMessage());
+                    }
+                } else {
+                    whLog("Form sorulari alinamadi form=$formFk kod={$rq['kod']}");
+                }
+            }
+        }
+
         // Alan eşlemesi (form için tanımlıysa) — yoksa otomatik tahmin devreye girer
         $a = alanlariEsle($db, $formFk !== null ? (int)$formFk : null, $fieldData);
 

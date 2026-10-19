@@ -20,6 +20,7 @@ require_once __DIR__ . '/admin/db.php';
 require_once __DIR__ . '/admin/includes/BasvuruLogHelper.php';
 require_once __DIR__ . '/admin/includes/EntegrasyonHelper.php';
 require_once __DIR__ . '/admin/includes/KaraListeHelper.php';
+require_once __DIR__ . '/admin/includes/MetaLeadAlan.php';
 
 const DIS_BASVURU_KULLANICI   = 0;   // OlusturanKullanici (dış kaynak — API ile aynı)
 const DIS_BASVURU_LIMIT       = 5;   // oturum başına en fazla gönderim
@@ -192,6 +193,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $personelId = disBasvuruPersonel($db, $_POST['p'] ?? 0);
     $leadFormId = disBasvuruLeadForm($db, $_POST['f'] ?? 0);
 
+    // Ek sorular: alanlar=[{key,label,value}] (JSON). Ad soyad + telefon her zaman eklenir;
+    // böylece panelde Alan Eşleme modalında formun tüm soruları görünür.
+    $webAlanlar = [
+        ['key' => 'ad_soyad', 'label' => 'Ad Soyad', 'value' => $ad . ' ' . $soyad],
+        ['key' => 'telefon',  'label' => 'Telefon',  'value' => $gsm],
+    ];
+    $ekAlanlar = json_decode((string)($_POST['alanlar'] ?? ''), true);
+    foreach (array_slice(is_array($ekAlanlar) ? $ekAlanlar : [], 0, 15) as $ek) {
+        $key = mb_strtolower(trim((string)($ek['key'] ?? '')));
+        if (!preg_match('/^[\p{L}\p{N}_?-]{1,60}$/u', $key) || in_array($key, ['ad_soyad', 'telefon'], true)) continue;
+        $webAlanlar[] = [
+            'key'   => $key,
+            'label' => mb_substr(trim(strip_tags((string)($ek['label'] ?? ''))), 0, 200),
+            'value' => mb_substr(trim(strip_tags((string)($ek['value'] ?? ''))), 0, 500),
+        ];
+    }
+
     try {
         // Aynı oturumda kısa süre önce aynı GSM ile açılmış kayıt varsa onu kullan (çift tık / tekrar dene)
         $mevcut = null;
@@ -208,6 +226,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $engel = KaraListe::kontrolVeLogla($gsm, 'dis-basvuru-formu', ['ad' => $ad, 'soyad' => $soyad, 'p' => $personelId, 'f' => $leadFormId], null, DIS_BASVURU_KULLANICI);
             if ($engel) disBasvuruJson(['success' => false, 'message' => 'Bu numara ile işlem yapılamıyor.']);
 
+            // Ad soyad / telefon yukarıda doğrulandı; eşlemeden yalnız diğer kolonlar alınır
+            $cozum    = webFormAlanlariniIsle($db, $leadFormId ?: null, $webAlanlar, DIS_BASVURU_KULLANICI);
+            $aciklama = 'Dış başvuru formu' . (!empty($cozum['Basvuru_Aciklama']) ? "
+" . $cozum['Basvuru_Aciklama'] : '');
+
             $now  = date('Y-m-d H:i:s');
             $data = [
                 'Isim'                 => $ad,
@@ -217,7 +240,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 'phoneNumber'          => substr($gsm, 5),
                 'AltBayiPersonel_ID'   => $personelId,
                 'ReklamLeadFormlari_ID' => $leadFormId,
-                'Basvuru_Aciklama'     => 'Dış başvuru formu',
+                'email'                => $cozum['email'] ?? null,
+                'TCKimlikNo'           => $cozum['TCKimlikNo'] ?? null,
+                'birthDate'            => $cozum['birthDate'] ?? null,
+                'Basvuru_Aciklama'     => mb_substr($aciklama, 0, 500),
                 'OlusturanKullanici'   => DIS_BASVURU_KULLANICI,
                 'OlusturmaTarihi'      => $now,
                 'GuncelleyenKullanici' => DIS_BASVURU_KULLANICI,
