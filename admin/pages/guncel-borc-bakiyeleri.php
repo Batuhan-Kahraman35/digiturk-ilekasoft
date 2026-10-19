@@ -415,7 +415,6 @@ $e = fn($s) => htmlspecialchars((string)$s);
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.13.1/font/bootstrap-icons.min.css" crossorigin="anonymous">
     <link rel="stylesheet" href="/Admin/assets/css/adminlte.min.css">
     <link rel="stylesheet" href="https://cdn.datatables.net/1.13.6/css/dataTables.bootstrap5.min.css">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.css">
     <link href="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/select2-bootstrap-5-theme@1.3.0/dist/select2-bootstrap-5-theme.min.css" rel="stylesheet">
     <link rel="stylesheet" href="/Admin/assets/css/custom.css">
@@ -474,7 +473,20 @@ $e = fn($s) => htmlspecialchars((string)$s);
                                     <label class="form-label" for="filter_bit">Bitiş</label>
                                     <input type="date" class="form-control" id="filter_bit" name="bit" value="<?= $e($bit) ?>" max="<?= $e($bugun->format('Y-m-d')) ?>">
                                 </div>
-                                <div class="col-md-6 d-flex flex-wrap gap-2">
+                                <div class="col-md-3">
+                                    <label class="form-label" for="filter_hesap">Reklam Hesabı</label>
+                                    <select class="form-select" id="filter_hesap" name="hesap">
+                                        <option value="">Tümü</option>
+                                        <?php
+                                        $hesapSecili = (string)($_GET['hesap'] ?? '');
+                                        $hesapAdlari = array_unique(array_filter(array_map(fn($a) => $a['name'] ?? null, $tumHesaplar)));
+                                        sort($hesapAdlari, SORT_NATURAL);
+                                        foreach ($hesapAdlari as $hAd): ?>
+                                            <option value="<?= $e($hAd) ?>"<?= $hAd === $hesapSecili ? ' selected' : '' ?>><?= $e($hAd) ?></option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                </div>
+                                <div class="col-md-3 d-flex flex-wrap gap-2">
                                     <button type="button" class="btn btn-outline-secondary btn-sm" data-gun-bas="0" data-gun-bit="0">Bugün</button>
                                     <button type="button" class="btn btn-outline-secondary btn-sm" data-gun-bas="1" data-gun-bit="1">Dün</button>
                                     <button type="button" class="btn btn-outline-secondary btn-sm" data-gun-bas="6" data-gun-bit="0">Son 7 gün</button>
@@ -567,36 +579,12 @@ $e = fn($s) => htmlspecialchars((string)$s);
                     </div>
                 </div>
 
-                <!-- Hesap × gün: harcama (KDV dahil) + lead — AJAX, varsayılan bugün -->
+                <!-- Hesap × gün: harcama (KDV dahil) + lead — AJAX, üstteki filtrenin tarih aralığı -->
                 <div class="card mb-4">
                     <div class="card-header bg-success text-white">
-                        <h3 class="card-title"><i class="bi bi-table"></i> Hesap Bazında Günlük Harcama ve Lead · <span id="gunlukBaslik">Bugün</span></h3>
+                        <h3 class="card-title"><i class="bi bi-table"></i> Hesap Bazında Günlük Harcama ve Lead · <span id="gunlukBaslik"><?= $e($basTar->format('d.m.Y')) ?> – <?= $e($bitTar->format('d.m.Y')) ?></span></h3>
                     </div>
                     <div class="card-body">
-                        <div class="row g-2 align-items-end mb-3">
-                            <div class="col-md-4">
-                                <label class="form-label" for="dt_gunler">Gün(ler)</label>
-                                <input type="text" class="form-control" id="dt_gunler" placeholder="Gün seçin (tekli / çoklu)" readonly>
-                            </div>
-                            <div class="col-md-3">
-                                <label class="form-label" for="filter_hesap">Reklam Hesabı</label>
-                                <select class="form-select" id="filter_hesap">
-                                    <option value="">Tümü</option>
-                                    <?php
-                                    $hesapAdlari = array_unique(array_filter(array_map(fn($a) => $a['name'] ?? null, $tumHesaplar)));
-                                    sort($hesapAdlari, SORT_NATURAL);
-                                    foreach ($hesapAdlari as $hAd): ?>
-                                        <option value="<?= $e($hAd) ?>"><?= $e($hAd) ?></option>
-                                    <?php endforeach; ?>
-                                </select>
-                            </div>
-                            <div class="col-md-5 d-flex flex-wrap gap-2">
-                                <button type="button" class="btn btn-outline-secondary btn-sm" data-dt-gun="0">Bugün</button>
-                                <button type="button" class="btn btn-outline-secondary btn-sm" data-dt-gun="1">Dün</button>
-                                <button type="button" class="btn btn-outline-secondary btn-sm" data-dt-son="7">Son 7 gün</button>
-                                <button type="button" class="btn btn-outline-secondary btn-sm" data-dt-son="30">Son 30 gün</button>
-                            </div>
-                        </div>
                         <table id="gunlukTable" class="table table-sm table-hover table-striped align-middle w-100">
                             <thead class="table-light">
                                 <tr>
@@ -714,40 +702,29 @@ $e = fn($s) => htmlspecialchars((string)$s);
 <script src="https://cdn.datatables.net/1.13.6/js/dataTables.bootstrap5.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
 <script src="/Admin/assets/js/custom.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/tr.js"></script>
 <script>
-// Hesap × gün tablosu — AJAX (?action=gunluk), varsayılan bugün; takvimden tekli/çoklu gün seçilir
+// Hesap × gün tablosu — AJAX (?action=gunluk); gün aralığı ve hesap üstteki filtreden gelir
 $(function () {
     const cur = <?= json_encode($harcamaCur) ?>;
     const tl  = n => Number(n).toLocaleString('tr-TR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' ' + cur;
     const trTarih = s => s.split('-').reverse().join('.');
-    const gunOnce = n => { const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - n); return d; };
-
-    const fp = flatpickr('#dt_gunler', {
-        mode: 'multiple',
-        dateFormat: 'Y-m-d',
-        altInput: true,
-        altFormat: 'd.m.Y',
-        conjunction: ', ',
-        maxDate: 'today',
-        locale: 'tr',
-        defaultDate: [gunOnce(0)],
-        onClose: () => dt.ajax.reload()
-    });
-    const seciliGunler = () => fp.selectedDates.map(d => fp.formatDate(d, 'Y-m-d')).sort();
+    const hesapArama = v => v ? '^' + $.fn.dataTable.util.escapeRegex(v) + '$' : '';
+    <?php
+    $filtreGunleri = [];
+    for ($g = clone $basTar; $g <= $bitTar; $g->modify('+1 day')) $filtreGunleri[] = $g->format('Y-m-d');
+    ?>
+    const filtreGunleri = <?= json_encode($filtreGunleri) ?>;
 
     const dt = $('#gunlukTable').DataTable({
         language: { url: '//cdn.datatables.net/plug-ins/1.13.6/i18n/tr.json' },
         dom: 'lrtip',
         processing: true,
+        searchCols: [null, { search: hesapArama($('#filter_hesap').val()), regex: true, smart: false }, null, null, null, null],
         ajax: {
             url: '?action=gunluk',
-            data: d => ({ gunler: seciliGunler().join(','), kdv: <?= json_encode((float)$kdvOrani) ?> }),
+            data: d => ({ gunler: filtreGunleri.join(','), kdv: <?= json_encode((float)$kdvOrani) ?> }),
             dataSrc: function (json) {
                 if (json.hata) showToast(json.hata, 'error');
-                const g = json.gunler || [];
-                $('#gunlukBaslik').text(g.length === 1 ? trTarih(g[0]) : g.length + ' gün (' + trTarih(g[0]) + ' – ' + trTarih(g[g.length - 1]) + ')');
                 return json.data;
             },
             error: () => showToast('Günlük harcama verisi alınamadı.', 'error')
@@ -776,18 +753,9 @@ $(function () {
         }
     });
 
-    // Hızlı seçimler
-    $('[data-dt-gun]').on('click', function () { fp.setDate([gunOnce(+$(this).data('dt-gun'))]); dt.ajax.reload(); });
-    $('[data-dt-son]').on('click', function () {
-        const n = +$(this).data('dt-son');
-        fp.setDate(Array.from({ length: n }, (_, i) => gunOnce(i)));
-        dt.ajax.reload();
-    });
-
-    // Hesap filtresi → tablo süzülür (sunucuya gitmez)
+    // Hesap filtresi → tablo anında süzülür (sunucuya gitmez); "Uygula" ile URL'de de kalır
     $('#filter_hesap').on('change', function () {
-        const v = $(this).val();
-        dt.column(1).search(v ? '^' + $.fn.dataTable.util.escapeRegex(v) + '$' : '', true, false).draw();
+        dt.column(1).search(hesapArama($(this).val()), true, false).draw();
     });
 });
 </script>
