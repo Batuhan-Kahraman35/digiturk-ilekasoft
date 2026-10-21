@@ -177,6 +177,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 'site_ayarlari_cron_hata_kullanici_id' => (int)($_POST['cron_hata_kullanici_id'] ?? 0) ?: null,
                 'site_ayarlari_cron_hata_kategori_id'  => (int)($_POST['cron_hata_kategori_id']  ?? 0) ?: null,
                 'site_ayarlari_cron_hata_oncelik_id'   => (int)($_POST['cron_hata_oncelik_id']   ?? 0) ?: null,
+                'site_ayarlari_api_personel_id'        => (int)($_POST['api_personel_id']        ?? 0) ?: null,
+                'site_ayarlari_eposta_alan_adi'        => strtolower(ltrim(trim($_POST['eposta_alan_adi'] ?? ''), '@')) ?: null,
                 'site_ayarlari_guncelleme_tarihi' => date('Y-m-d H:i:s'),
                 'site_ayarlari_guncelleyen_kullanici_id' => $user['kullanicilar_id']
             ];
@@ -214,6 +216,16 @@ $cronHataKullanicilar = $db->fetchAll("
     FROM kullanicilar
     WHERE kullanici_durum = 1 AND ISNULL(kullanici_email, '') <> ''
     ORDER BY kullanici_ad, kullanici_soyad") ?: [];
+
+// Varsayılan API personeli: IRIS rapor/token, ccapi talep sorgusu ve kampanya güncellemesi bu hesapla yapılır
+$apiPersoneller = $db->fetchAll("
+    SELECT p.DigiturkAltBayiPersonel_Id AS id,
+           p.DigiturkAltBayiPersonel_AdSoyad AS ad,
+           ISNULL(a.DigiturkAltBayiler_Ad, '-') AS bayi
+    FROM DigiturkAltBayiPersonel p
+    LEFT JOIN DigiturkAltBayiler a ON p.DigiturkAltBayiPersonel_AltBayiId = a.DigiturkAltBayiler_Id
+    WHERE p.Durum = 1
+    ORDER BY a.DigiturkAltBayiler_Ad, p.DigiturkAltBayiPersonel_AdSoyad") ?: [];
 
 require_once __DIR__ . '/../includes/DestekHelper.php';
 $destekMeta        = DestekHelper::aktifMi() ? (DestekHelper::meta()['data'] ?? []) : [];
@@ -686,6 +698,30 @@ $destekOncelikler  = $destekMeta['oncelikler']  ?? [];
                                             <div class="col-12"><div class="form-text mt-0 mb-3">Aynı görev + zamanlayıcı için 24 saatte en fazla bir talep açılır. Görev bazında kapatmak için Cron Yönetimi'ndeki "Hata Talebi" anahtarını kullanın.</div></div>
                                         </div>
 
+                                        <div class="form-section-title">Bayi / Kurulum Ayarları</div>
+                                        <div class="row">
+                                            <div class="col-md-6">
+                                                <div class="mb-3">
+                                                    <label for="api_personel_id" class="form-label">Varsayılan API Personeli</label>
+                                                    <select class="form-select" id="api_personel_id" name="api_personel_id">
+                                                        <option value="">— Seçiniz —</option>
+                                                        <?php foreach ($apiPersoneller as $p): ?>
+                                                        <option value="<?= (int)$p['id'] ?>"><?= htmlspecialchars($p['ad'] . ' (' . $p['bayi'] . ')') ?></option>
+                                                        <?php endforeach; ?>
+                                                    </select>
+                                                    <div class="form-text">IRIS rapor/token yenileme, IRIS talep sorgusu ve API kampanya güncellemesi bu personelin token'ı ile yapılır</div>
+                                                </div>
+                                            </div>
+                                            <div class="col-md-6">
+                                                <div class="mb-3">
+                                                    <label for="eposta_alan_adi" class="form-label">Personel E-posta Alan Adı</label>
+                                                    <input type="text" class="form-control" id="eposta_alan_adi" name="eposta_alan_adi" maxlength="100"
+                                                           placeholder="ornek.com.tr">
+                                                    <div class="form-text">Personel formunda ad-soyaddan otomatik e-posta üretilir (isim.soyisim@alan). Boşsa üretilmez.</div>
+                                                </div>
+                                            </div>
+                                        </div>
+
                                         <div class="form-section-title">CallCenter Ayarları</div>
                                         <div class="row">
                                             <div class="col-md-6">
@@ -885,7 +921,8 @@ $destekOncelikler  = $destekMeta['oncelikler']  ?? [];
                 'maintenance_message', 'log_level', 'log_retention_days',
                 'destek_api_key', 'destek_api_url',
                 'firma_adi', 'iletisim_eposta', 'callcenter_lead_url',
-                'cron_hata_kullanici_id', 'cron_hata_kategori_id', 'cron_hata_oncelik_id'
+                'cron_hata_kullanici_id', 'cron_hata_kategori_id', 'cron_hata_oncelik_id',
+                'api_personel_id', 'eposta_alan_adi'
             ];
             
             fields.forEach(field => {

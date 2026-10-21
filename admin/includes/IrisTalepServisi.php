@@ -20,7 +20,8 @@
  */
 
 defined('IRIS_WEB_BASE')        || define('IRIS_WEB_BASE',        'https://iris.digiturk.com.tr/api');
-defined('IRIS_TALEP_PERSONEL')  || define('IRIS_TALEP_PERSONEL',  1);   // ccapi token'ı alınan personel (web oturumu DEĞİL)
+require_once __DIR__ . '/../db.php';
+defined('IRIS_TALEP_PERSONEL')  || define('IRIS_TALEP_PERSONEL',  (int)siteAyar('api_personel_id', 0)); // ccapi token'ı alınan personel (web oturumu DEĞİL) — Site Ayarları
 defined('IRIS_ARAMA_TELEFON')   || define('IRIS_ARAMA_TELEFON',   5);   // ParameterType: telefon
 defined('IRIS_CAGRI_BEKLEME')   || define('IRIS_CAGRI_BEKLEME',   250); // ms
 defined('IRIS_EP_DURUM')        || define('IRIS_EP_DURUM',        17);  // Order/CheckRequisition (tekil, query string)

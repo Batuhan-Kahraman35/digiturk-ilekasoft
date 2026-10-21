@@ -10,7 +10,8 @@ defined('IRIS_POLL_INTERVAL') || define('IRIS_POLL_INTERVAL', 10);
 defined('IRIS_POLL_TIMEOUT')  || define('IRIS_POLL_TIMEOUT',  300);
 // Rapor içeriği indirme süresi. 30 günlük parça 2,5 MB'ı aştığı için 60 sn yetmiyordu.
 defined('IRIS_HTTP_TIMEOUT')  || define('IRIS_HTTP_TIMEOUT',  300);
-defined('IRIS_PERSONEL_ID')   || define('IRIS_PERSONEL_ID',   1);
+// Site Ayarları > Varsayılan API Personeli (kurulum/bayi bazlı, kodda sabit değil)
+defined('IRIS_PERSONEL_ID')   || define('IRIS_PERSONEL_ID',   (int)siteAyar('api_personel_id', 0));
 // iris_talep_eslestir: art arda bu kadar IRIS hatasında tur kesilir
 defined('IRIS_ARDISIK_HATA_LIMIT') || define('IRIS_ARDISIK_HATA_LIMIT', 5);
 

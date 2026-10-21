@@ -522,7 +522,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'excel
             sd.BasvuruSurecDurum_Mesaj AS SurecMesaj,
             idr.BasvuruIletisimDurum_Mesaj AS IletisimDurumMesaj,
             CONVERT(VARCHAR(19), t.OlusturmaTarihi, 120) AS OlusturmaTarihi,
-            LTRIM(RTRIM(CONCAT(ISNULL(ak.kullanici_ad, ''), ' ', ISNULL(ak.kullanici_soyad, '')))) AS AtananAdSoyad
+            LTRIM(RTRIM(CONCAT(ISNULL(ak.kullanici_ad, ''), ' ', ISNULL(ak.kullanici_soyad, '')))) AS AtananAdSoyad,
+            t.Basvuru_Aciklama         AS Aciklama
         FROM Basvurular t
         LEFT JOIN APIKampanyalar         kmp ON kmp.APIKampanyalar_Id        = t.Kampanyalar_ID
         LEFT JOIN BasvuruDurum           bd  ON bd.BasvuruDurum_id           = t.BasvuruDurum_ID
@@ -547,9 +548,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'excel
     echo '<x:Name>Başvurular</x:Name>';
     echo '<x:WorksheetOptions><x:Print><x:ValidPrinterInfo/></x:Print></x:WorksheetOptions>';
     echo '</x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook></xml>';
+    echo '<style>br{mso-data-placement:same-cell;}</style>'; // <br> yeni satıra bölünmesin
     echo '</head><body><table border="1"><thead>';
     echo '<tr style="background-color:#0d6efd;color:white;font-weight:bold;">';
-    foreach (['Birim','Alt Bayi Personeli','Ad Soyad','TC Kimlik','Telefon','Kampanya','Başvuru Durumu','Durum Mesajı','Süreç Durumu','İletişim Durumu','Tarih','Atanan','Reklam'] as $h) {
+    foreach (['Birim','Alt Bayi Personeli','Ad Soyad','TC Kimlik','Telefon','Kampanya','Başvuru Durumu','Durum Mesajı','Süreç Durumu','İletişim Durumu','Tarih','Atanan','Reklam','Açıklama'] as $h) {
         echo '<th>' . htmlspecialchars($h) . '</th>';
     }
     echo '</tr></thead><tbody>';
@@ -569,6 +571,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'excel
         echo '<td>' . htmlspecialchars($r['OlusturmaTarihi'] ?? '') . '</td>';
         echo '<td>' . htmlspecialchars($r['AtananAdSoyad'] ?? '') . '</td>';
         echo '<td>' . htmlspecialchars($r['LeadFormuDurum'] ?? '') . '</td>';
+        // Çok satırlı açıklama (Soru: cevap) tek hücrede alt alta kalsın
+        echo '<td style="white-space:pre-wrap;mso-number-format:\'\@\'">' . nl2br(htmlspecialchars($r['Aciklama'] ?? '')) . '</td>';
         echo '</tr>';
     }
     echo '</tbody></table></body></html>';

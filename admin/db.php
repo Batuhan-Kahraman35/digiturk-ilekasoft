@@ -265,3 +265,19 @@ class Database {
         }
     }
 }
+
+/**
+ * tanim_site_ayarlari'dan tek alan okur (istek başına bir sorgu, önbellekli).
+ * Kurulum/bayi bazlı değerler (API personeli, e-posta alan adı vb.) kodda sabit tutulmaz.
+ * @param string $alan 'site_ayarlari_' öneki olmadan kolon adı
+ */
+if (!function_exists('siteAyar')) {
+    function siteAyar(string $alan, $varsayilan = null) {
+        static $ayarlar = null;
+        if ($ayarlar === null) {
+            $ayarlar = Database::getInstance()->fetchOne("SELECT TOP 1 * FROM dbo.tanim_site_ayarlari ORDER BY site_ayarlari_id DESC") ?: [];
+        }
+        $deger = $ayarlar['site_ayarlari_' . $alan] ?? null;
+        return ($deger === null || $deger === '') ? $varsayilan : $deger;
+    }
+}

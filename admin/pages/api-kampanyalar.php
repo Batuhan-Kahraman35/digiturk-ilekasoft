@@ -667,8 +667,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $personel = $db->fetchOne("
                     SELECT DigiturkAltBayiPersonel_Token
                     FROM DigiturkAltBayiPersonel
-                    WHERE DigiturkAltBayiPersonel_Id = 1
-                ");
+                    WHERE DigiturkAltBayiPersonel_Id = ?
+                ", [(int)siteAyar('api_personel_id', 0)]);
 
                 if (!$personel || empty($personel['DigiturkAltBayiPersonel_Token'])) {
                     echo json_encode(['success' => false, 'message' => 'Aktif token bulunamadı! Lütfen token yenileyin.']);

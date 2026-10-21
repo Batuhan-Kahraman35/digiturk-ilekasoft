@@ -8,8 +8,8 @@ $_apiPersonel = $db->fetchOne("
         a.DigiturkAltBayiler_Ad AS AltBayiAdi
     FROM DigiturkAltBayiPersonel p
     LEFT JOIN DigiturkAltBayiler a ON p.DigiturkAltBayiPersonel_AltBayiId = a.DigiturkAltBayiler_Id
-    WHERE p.DigiturkAltBayiPersonel_Id = 1
-");
+    WHERE p.DigiturkAltBayiPersonel_Id = ?
+", [(int)siteAyar('api_personel_id', 0)]);
 ?>
 <div class="card card-outline card-info mb-3">
     <div class="card-header py-2">

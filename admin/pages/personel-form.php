@@ -149,11 +149,15 @@ if (!function_exists('personelTelefonNormalize')) {
 }
 
 /**
- * Ad ve soyaddan kurumsal e-posta uretir: isim.soyisim@ornekyazilim.com
+ * Ad ve soyaddan kurumsal e-posta uretir: isim.soyisim@<alan adi>
+ * Alan adi Site Ayarlari > Personel E-posta Alan Adi'ndan gelir; bossa e-posta uretilmez.
  */
 if (!function_exists('personelEpostaUret')) {
-    function personelEpostaUret(string $ad, string $soyad, string $alan = 'ornekyazilim.com'): string
+    function personelEpostaUret(string $ad, string $soyad, ?string $alan = null): string
     {
+        $alan = $alan ?? (string) siteAyar('eposta_alan_adi', '');
+        if ($alan === '') return '';
+
         $tr = ['ç'=>'c','Ç'=>'c','ğ'=>'g','Ğ'=>'g','ı'=>'i','I'=>'i','İ'=>'i','ö'=>'o','Ö'=>'o','ş'=>'s','Ş'=>'s','ü'=>'u','Ü'=>'u'];
         $sadelestir = static function (string $metin) use ($tr): string {
             $metin = strtr($metin, $tr);
@@ -790,7 +794,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 (function ($) {
     'use strict';
 
-    var ALAN_ADI = 'ornekyazilim.com';
+    var ALAN_ADI = <?= json_encode((string) siteAyar('eposta_alan_adi', '')) ?>;
 
     // Turkce karakterleri sadelestirip e-posta parcasi uretir
     function epostaSadelestir(metin) {
@@ -823,7 +827,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         function epostaUret() {
             var ad = epostaSadelestir($ad.val());
             var soyad = epostaSadelestir($soyad.val());
-            if (!ad && !soyad) return '';
+            if (!ALAN_ADI || (!ad && !soyad)) return '';
             if (!soyad) return ad + '@' + ALAN_ADI;
             if (!ad)    return soyad + '@' + ALAN_ADI;
             return ad + '.' + soyad + '@' + ALAN_ADI;
