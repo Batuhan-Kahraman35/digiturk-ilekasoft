@@ -551,7 +551,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $liste = $db->fetchAll("
                     SELECT f.*, s.ReklamFacebookSayfalari_SayfaAdi, p.ReklamPlatformlari_Adi AS platform_adi,
                            ISNULL(ld.adet, 0) AS lead_adedi,
-                           ISNULL(ld.kurulan, 0) AS kurulan_adedi,
+                           ISNULL(ld.satis, 0) AS satis_adedi,
                            ld.son              AS son_lead,
                            ISNULL(es.toplam, 0)  AS alan_toplam,
                            ISNULL(es.eslenen, 0) AS alan_eslenen
@@ -562,7 +562,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     LEFT JOIN ReklamPlatformlari p ON h.ReklamHesaplari_Platform_id = p.ReklamPlatformlari_id
                     OUTER APPLY (
                         SELECT COUNT(*) AS adet, MAX(b.OlusturmaTarihi) AS son,
-                               SUM(CASE WHEN b.BasvuruDurum_ID = 1 THEN 1 ELSE 0 END) AS kurulan
+                               SUM(CASE WHEN b.BasvuruDurum_ID = 1 THEN 1 ELSE 0 END) AS satis
                         FROM Basvurular b
                         WHERE b.ReklamLeadFormlari_ID = f.ReklamLeadFormlari_id
                     ) ld
@@ -1846,7 +1846,7 @@ $canDel  = $permissions['can_delete'] ? 'true' : 'false';
                             </div>
                             <div class="card-body">
                                 <table id="tblForm" class="table table-bordered table-striped table-hover">
-                                    <thead><tr><th>ID</th><th>Form Adı</th><th>Sayfa</th><th>Form ID</th><th>Form Durumu</th><th>Eşleme</th><th>Lead</th><th>Kurulan</th><th>Son Lead</th><th>Durum</th><th>İşlem</th></tr></thead>
+                                    <thead><tr><th>ID</th><th>Form Adı</th><th>Sayfa</th><th>Form ID</th><th>Form Durumu</th><th>Eşleme</th><th>Lead</th><th>Satış</th><th>Son Lead</th><th>Durum</th><th>İşlem</th></tr></thead>
                                     <tbody></tbody>
                                 </table>
                             </div>
@@ -2128,8 +2128,8 @@ function leadAdetRozet(adet) {
     return `<span class="badge text-bg-primary">${n.toLocaleString('tr-TR')}</span>`;
 }
 
-// Kurulan adedi (BasvuruDurum_ID = 1) — sıfırsa soluk, doluysa yeşil
-function kurulanAdetRozet(adet) {
+// Satış adedi (BasvuruDurum_ID = 1) — sıfırsa soluk, doluysa yeşil
+function satisAdetRozet(adet) {
     const n = parseInt(adet || 0, 10);
     if (!n) return '<span class="badge text-bg-secondary">0</span>';
     return `<span class="badge text-bg-success">${n.toLocaleString('tr-TR')}</span>`;
@@ -2477,7 +2477,7 @@ function satirHtml(ent, x) {
             <td id="md-form-${x.ReklamLeadFormlari_id}">${metinDurumBadge(x.ReklamLeadFormlari_FormDurumu)}</td>
             <td data-order="${parseInt(x.alan_eslenen||0,10)}">${eslemeRozet(x.alan_eslenen, x.alan_toplam)}</td>
             <td data-order="${parseInt(x.lead_adedi||0,10)}">${leadAdetRozet(x.lead_adedi)}</td>
-            <td data-order="${parseInt(x.kurulan_adedi||0,10)}">${kurulanAdetRozet(x.kurulan_adedi)}</td>
+            <td data-order="${parseInt(x.satis_adedi||0,10)}">${satisAdetRozet(x.satis_adedi)}</td>
             <td data-order="${x.son_lead ? new Date(String(x.son_lead).replace(" ","T")).getTime()||0 : 0}">${sonLeadMetni(x.son_lead)}</td>
             <td>${durumSwitch('form', x.ReklamLeadFormlari_id, x.Durum)}</td>
             <td>${metaKontrolBtn('form', x)}${CAN.edit ? `<button class="btn btn-sm btn-info me-1" title="Alan Eşle" onclick="alanEslemeAc(${x.ReklamLeadFormlari_id})"><i class="bi bi-diagram-3"></i></button>` : ''}${islemBtn('form', x.ReklamLeadFormlari_id, x.ReklamLeadFormlari_FormAdi)}</td></tr>`;
