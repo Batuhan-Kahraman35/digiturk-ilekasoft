@@ -80,6 +80,16 @@ function renameModuleFolder($oldUrl, $newUrl) {
     return false;
 }
 
+// Menu_SayfaYetkileri yetki kolonları (kolon adı => başlık); AJAX'ta whitelist olarak da kullanılır
+$yetkiAlanlari = [
+    'gor' => 'Gör',
+    'kendi_kullanicini_gor' => 'Kendi Kayıtları',
+    'birim_gor' => 'Birim Gör',
+    'ekle' => 'Ekle',
+    'duzenle' => 'Düzenle',
+    'sil' => 'Sil'
+];
+
 // AJAX işlemleri
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_POST['ajax_action'])) {
     header('Content-Type: application/json; charset=utf-8');
@@ -274,6 +284,164 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_POST['ajax_action'])) {
             echo json_encode(['success' => true, 'message' => 'Sayfa başarıyla güncellendi' . (!empty($oldUrl) && $oldUrl !== $sayfaUrl ? ' ve dosya yeniden adlandırıldı' : '')]);
             exit;
         }
+
+        // MENÜ SIRALAMA (sürükle-bırak)
+        if ($action === 'menu_reorder') {
+            if (!$pagePermissions['can_edit']) {
+                throw new Exception('Düzenleme Yetkiniz bulunmamaktadır.');
+            }
+
+            $siralar = json_decode($_POST['siralar'] ?? '[]', true);
+            if (!is_array($siralar) || empty($siralar)) {
+                throw new Exception('Sıralama verisi geçersiz');
+            }
+
+            foreach ($siralar as $satir) {
+                $id = (int)($satir['id'] ?? 0);
+                $sira = (int)($satir['sira'] ?? 0);
+                if ($id <= 0) {
+                    continue;
+                }
+                $db->execute(
+                    "UPDATE Menuler SET menuler_sira_no = ?, menuler_updated_at = SYSUTCDATEtime() WHERE menuler_id = ?",
+                    [$sira, $id]
+                );
+            }
+
+            echo json_encode(['success' => true, 'message' => 'Menü sıralaması güncellendi']);
+            exit;
+        }
+
+        // SAYFA SIRALAMA (sürükle-bırak)
+        if ($action === 'page_reorder') {
+            if (!$pagePermissions['can_edit']) {
+                throw new Exception('Düzenleme Yetkiniz bulunmamaktadır.');
+            }
+
+            $siralar = json_decode($_POST['siralar'] ?? '[]', true);
+            if (!is_array($siralar) || empty($siralar)) {
+                throw new Exception('Sıralama verisi geçersiz');
+            }
+
+            foreach ($siralar as $satir) {
+                $id = (int)($satir['id'] ?? 0);
+                $sira = (int)($satir['sira'] ?? 0);
+                if ($id <= 0) {
+                    continue;
+                }
+                $db->execute(
+                    "UPDATE Menu_Sayfalar SET sayfalar_sira_no = ?, sayfalar_updated_at = SYSUTCDATEtime() WHERE sayfalar_id = ?",
+                    [$sira, $id]
+                );
+            }
+
+            echo json_encode(['success' => true, 'message' => 'Sayfa sıralaması güncellendi']);
+            exit;
+        }
+
+        // YETKİ İŞLEMLERİ (Menu_SayfaYetkileri: menü kaydı menu_id, sayfa kaydı sayfa_id ile tutulur)
+        if (in_array($action, ['yetki_liste', 'yetki_ekle'], true)) {
+            $tip = $_POST['tip'] ?? '';
+            $kayitId = (int)($_POST['kayit_id'] ?? 0);
+            if (!in_array($tip, ['menu', 'sayfa'], true) || $kayitId <= 0) {
+                throw new Exception('Geçersiz menü/sayfa');
+            }
+            $yetkiKolon = $tip === 'menu' ? 'menu_id' : 'sayfa_id';
+            $digerKolon = $tip === 'menu' ? 'sayfa_id' : 'menu_id';
+        }
+
+        if ($action === 'yetki_liste') {
+            $yetkiler = $db->fetchAll("
+                SELECT y.menu_sayfa_yetki_id AS yetki_id, y.departman_id, d.departman_adi,
+                       y.gor, y.kendi_kullanicini_gor, y.birim_gor, y.ekle, y.duzenle, y.sil, y.durum
+                FROM Menu_SayfaYetkileri y
+                LEFT JOIN kullanici_Departmanlar d ON d.departman_id = y.departman_id
+                WHERE y.{$yetkiKolon} = ? AND y.{$digerKolon} IS NULL
+                ORDER BY d.departman_adi
+            ", [$kayitId]);
+
+            echo json_encode(['success' => true, 'data' => $yetkiler]);
+            exit;
+        }
+
+        if ($action === 'yetki_ekle') {
+            if (!$pagePermissions['can_add']) {
+                throw new Exception('Ekleme Yetkiniz bulunmamaktadır.');
+            }
+
+            $departmanIds = isset($_POST['departman_id']) && is_array($_POST['departman_id'])
+                ? array_filter(array_map('intval', $_POST['departman_id']))
+                : [];
+            if (empty($departmanIds)) {
+                throw new Exception('En az bir departman seçmelisiniz');
+            }
+
+            $yetkiData = ['durum' => 1];
+            foreach (array_keys($yetkiAlanlari) as $alan) {
+                $yetkiData[$alan] = isset($_POST[$alan]) ? 1 : 0;
+            }
+
+            $eklenen = 0;
+            $atlanan = 0;
+            foreach ($departmanIds as $departmanId) {
+                $mevcut = $db->fetchOne("
+                    SELECT menu_sayfa_yetki_id FROM Menu_SayfaYetkileri
+                    WHERE departman_id = ? AND {$yetkiKolon} = ? AND {$digerKolon} IS NULL
+                ", [$departmanId, $kayitId]);
+                if ($mevcut) {
+                    $atlanan++;
+                    continue;
+                }
+
+                $db->insert('Menu_SayfaYetkileri', array_merge($yetkiData, [
+                    'departman_id' => $departmanId,
+                    $yetkiKolon => $kayitId,
+                    $digerKolon => null,
+                    'created_at' => date('Y-m-d H:i:s')
+                ]));
+                $eklenen++;
+            }
+
+            $mesaj = "$eklenen yetki eklendi" . ($atlanan > 0 ? ", $atlanan departmanda zaten vardı (atlandı)" : '');
+            echo json_encode(['success' => true, 'message' => $mesaj]);
+            exit;
+        }
+
+        if ($action === 'yetki_guncelle') {
+            if (!$pagePermissions['can_edit']) {
+                throw new Exception('Düzenleme Yetkiniz bulunmamaktadır.');
+            }
+
+            $yetkiId = (int)($_POST['yetki_id'] ?? 0);
+            $alan = $_POST['alan'] ?? '';
+            // Kolon adı istemciden geldiği için whitelist ile doğrulanır
+            if ($yetkiId <= 0 || ($alan !== 'durum' && !array_key_exists($alan, $yetkiAlanlari))) {
+                throw new Exception('Geçersiz yetki alanı');
+            }
+
+            $db->update('Menu_SayfaYetkileri',
+                [$alan => !empty($_POST['deger']) ? 1 : 0, 'updated_at' => date('Y-m-d H:i:s')],
+                ['menu_sayfa_yetki_id' => $yetkiId]
+            );
+
+            echo json_encode(['success' => true, 'message' => 'Yetki güncellendi']);
+            exit;
+        }
+
+        if ($action === 'yetki_sil') {
+            if (!$pagePermissions['can_delete']) {
+                throw new Exception('Silme Yetkiniz bulunmamaktadır.');
+            }
+
+            $yetkiId = (int)($_POST['yetki_id'] ?? 0);
+            if ($yetkiId <= 0) {
+                throw new Exception('Geçersiz yetki id');
+            }
+
+            $db->delete('Menu_SayfaYetkileri', ['menu_sayfa_yetki_id' => $yetkiId]);
+            echo json_encode(['success' => true, 'message' => 'Yetki silindi']);
+            exit;
+        }
         
         if ($action === 'page_delete') {
             // Yetki kontrolç
@@ -333,15 +501,23 @@ $sayfalar = $db->fetchAll("
     FROM Menu_Sayfalar s
     LEFT JOiN Menuler m ON s.sayfalar_menu_id = m.menuler_id
     WHERE s.sayfalar_durum = 1
-    ORDER BY iSNULL(m.menuler_menu_adi, 'ZZZ'), s.sayfalar_sira_no
+    ORDER BY iSNULL(m.menuler_menu_adi, 'ZZZ'), s.sayfalar_menu_id, s.sayfalar_sira_no
 ");
 
 // Ana menüler (parent_id = NULL)
 $anaMenuler = $db->fetchAll("
     SELECT menuler_id, menuler_menu_adi 
     FROM Menuler 
-    WHERE menuler_parent_id IS NULL AND menuler_durum = 1 
+    WHERE menuler_parent_id IS NULL AND menuler_durum = 1
     ORDER BY menuler_sira_no
+");
+
+// Aktif departmanlar (yetki modalı için)
+$departmanlar = $db->fetchAll("
+    SELECT departman_id, departman_adi
+    FROM kullanici_Departmanlar
+    WHERE departman_durum = 1
+    ORDER BY departman_adi
 ");
 ?>
 <!DOCTYPE html>
@@ -369,6 +545,23 @@ $anaMenuler = $db->fetchAll("
         .app-sidebar {
             min-height: 100vh !important;
             height: 100% !important;
+        }
+        .drag-handle {
+            cursor: grab;
+            color: #adb5bd;
+        }
+        .drag-handle:active {
+            cursor: grabbing;
+        }
+        .sortable-ghost {
+            opacity: 0.4;
+            background-color: #cfe2ff !important;
+        }
+        .sortable-chosen {
+            background-color: #e9ecef !important;
+        }
+        .sortable-drag {
+            opacity: 0.9;
         }
     </style>
 </head>
@@ -467,6 +660,53 @@ $anaMenuler = $db->fetchAll("
                     <div class="tab-content" id="managementTabContent">
                         <!-- MENÜLER TAB -->
                         <div class="tab-pane fade show active" id="menu-panel" role="tabpanel">
+                            <!-- Filtre -->
+                            <div class="card card-outline card-secondary mb-3">
+                                <div class="card-header">
+                                    <h3 class="card-title"><i class="bi bi-funnel"></i> Filtrele</h3>
+                                    <div class="card-tools">
+                                        <button type="button" class="btn btn-tool" data-bs-toggle="collapse" data-bs-target="#menuFilterCard">
+                                            <i class="bi bi-chevron-down"></i>
+                                        </button>
+                                    </div>
+                                </div>
+                                <div class="card-body collapse" id="menuFilterCard">
+                                    <form id="menuFilterForm">
+                                        <div class="row g-3">
+                                            <div class="col-md-5">
+                                                <label class="form-label">Ara</label>
+                                                <input type="text" class="form-control" id="filter_menu_ara" placeholder="Menü adı veya ikon...">
+                                            </div>
+                                            <div class="col-md-4">
+                                                <label class="form-label">Üst Menü</label>
+                                                <select class="form-select" id="filter_menu_ust">
+                                                    <option value="">Tümü</option>
+                                                    <option value="0">Ana Menüler</option>
+                                                    <?php foreach ($anaMenuler as $am): ?>
+                                                    <option value="<?= $am['menuler_id'] ?>"><?= htmlspecialchars($am['menuler_menu_adi']) ?></option>
+                                                    <?php endforeach; ?>
+                                                </select>
+                                            </div>
+                                            <div class="col-md-3">
+                                                <label class="form-label">Header</label>
+                                                <select class="form-select" id="filter_menu_header">
+                                                    <option value="">Tümü</option>
+                                                    <option value="1">Evet</option>
+                                                    <option value="0">Hayır</option>
+                                                </select>
+                                            </div>
+                                            <div class="col-md-12">
+                                                <button type="submit" class="btn btn-primary">
+                                                    <i class="bi bi-search"></i> Filtrele
+                                                </button>
+                                                <button type="button" class="btn btn-secondary" id="menuFilterTemizle">
+                                                    <i class="bi bi-x-circle"></i> Temizle
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </form>
+                                </div>
+                            </div>
                             <div class="card card-primary card-outline">
                                 <div class="card-header">
                                     <h3 class="card-title">Menü Listesi</h3>
@@ -482,19 +722,27 @@ $anaMenuler = $db->fetchAll("
                                     <table class="table table-striped table-hover">
                                         <thead>
                                             <tr>
+                                                <?php if ($pagePermissions['can_edit']): ?>
+                                                <th style="width: 40px"></th>
+                                                <?php endif; ?>
                                                 <th style="width: 50px">#</th>
                                                 <th>Menü Adı</th>
                                                 <th>İkon</th>
                                                 <th>Üst Menü</th>
                                                 <th style="width: 80px">Sıra</th>
                                                 <th style="width: 90px" class="text-center">Header</th>
-                                                <th style="width: 120px" class="text-center">İşlemler</th>
+                                                <th style="width: 160px" class="text-center">İşlemler</th>
                                             </tr>
                                         </thead>
-                                        <tbody>
+                                        <tbody id="menuTableBody">
                                             <?php foreach ($menuler as $index => $menu): ?>
-                                            <tr>
-                                                <td><?= $index + 1 ?></td>
+                                            <tr data-id="<?= $menu['menuler_id'] ?>" data-grup="<?= $menu['menuler_parent_id'] ?? 0 ?>"
+                                                data-ara="<?= htmlspecialchars($menu['menuler_menu_adi'] . ' ' . ($menu['menuler_ikon'] ?? '')) ?>"
+                                                data-header="<?= $menu['menuler_header_goster'] ? 1 : 0 ?>">
+                                                <?php if ($pagePermissions['can_edit']): ?>
+                                                <td class="text-center drag-handle" title="Sürükleyerek sırala"><i class="bi bi-grip-vertical"></i></td>
+                                                <?php endif; ?>
+                                                <td class="row-index"><?= $index + 1 ?></td>
                                                 <td>
                                                     <?php if ($menu['menuler_parent_id']): ?>
                                                         <i class="bi bi-arrow-return-right text-muted"></i>
@@ -517,7 +765,7 @@ $anaMenuler = $db->fetchAll("
                                                     <?php endif; ?>
                                                 </td>
                                                 <td class="text-center">
-                                                    <span class="badge text-bg-info"><?= $menu['menuler_sira_no'] ?? '-' ?></span>
+                                                    <span class="badge text-bg-info sira-badge"><?= $menu['menuler_sira_no'] ?? '-' ?></span>
                                                 </td>
                                                 <td class="text-center">
                                                     <?php if ($menu['menuler_header_goster']): ?>
@@ -527,6 +775,9 @@ $anaMenuler = $db->fetchAll("
                                                     <?php endif; ?>
                                                 </td>
                                                 <td class="text-center table-actions">
+                                                    <button class="btn btn-sm btn-info" title="Yetkiler" onclick="yetkiModalAc('menu', <?= $menu['menuler_id'] ?>, <?= htmlspecialchars(json_encode($menu['menuler_menu_adi'])) ?>)">
+                                                        <i class="bi bi-shield-lock"></i>
+                                                    </button>
                                                     <?php if ($pagePermissions['can_edit']): ?>
                                                     <button class="btn btn-sm btn-warning" onclick="editMenu(<?= htmlspecialchars(json_encode($menu)) ?>)">
                                                         <i class="bi bi-pencil"></i>
@@ -540,9 +791,12 @@ $anaMenuler = $db->fetchAll("
                                                 </td>
                                             </tr>
                                             <?php endforeach; ?>
+                                            <tr class="filtre-bos d-none">
+                                                <td colspan="<?= $pagePermissions['can_edit'] ? 8 : 7 ?>" class="text-center text-muted py-4">Filtreye uygun menü bulunamadı</td>
+                                            </tr>
                                             <?php if (empty($menuler)): ?>
                                             <tr>
-                                                <td colspan="7" class="text-center text-muted py-4">Henüz menü eklenmemiş</td>
+                                                <td colspan="<?= $pagePermissions['can_edit'] ? 8 : 7 ?>" class="text-center text-muted py-4">Henüz menü eklenmemiş</td>
                                             </tr>
                                             <?php endif; ?>
                                         </tbody>
@@ -553,6 +807,53 @@ $anaMenuler = $db->fetchAll("
 
                         <!-- SAYFALAR TAB -->
                         <div class="tab-pane fade" id="page-panel" role="tabpanel">
+                            <!-- Filtre -->
+                            <div class="card card-outline card-secondary mb-3">
+                                <div class="card-header">
+                                    <h3 class="card-title"><i class="bi bi-funnel"></i> Filtrele</h3>
+                                    <div class="card-tools">
+                                        <button type="button" class="btn btn-tool" data-bs-toggle="collapse" data-bs-target="#pageFilterCard">
+                                            <i class="bi bi-chevron-down"></i>
+                                        </button>
+                                    </div>
+                                </div>
+                                <div class="card-body collapse" id="pageFilterCard">
+                                    <form id="pageFilterForm">
+                                        <div class="row g-3">
+                                            <div class="col-md-5">
+                                                <label class="form-label">Ara</label>
+                                                <input type="text" class="form-control" id="filter_sayfa_ara" placeholder="Sayfa adı veya URL...">
+                                            </div>
+                                            <div class="col-md-4">
+                                                <label class="form-label">Menü</label>
+                                                <select class="form-select" id="filter_sayfa_menu">
+                                                    <option value="">Tümü</option>
+                                                    <option value="0">Menü Yok</option>
+                                                    <?php foreach ($menuler as $m): ?>
+                                                    <option value="<?= $m['menuler_id'] ?>"><?= htmlspecialchars(($m['menuler_parent_adi'] ? $m['menuler_parent_adi'] . ' › ' : '') . $m['menuler_menu_adi']) ?></option>
+                                                    <?php endforeach; ?>
+                                                </select>
+                                            </div>
+                                            <div class="col-md-3">
+                                                <label class="form-label">Dashboard</label>
+                                                <select class="form-select" id="filter_sayfa_dashboard">
+                                                    <option value="">Tümü</option>
+                                                    <option value="1">Evet</option>
+                                                    <option value="0">Hayır</option>
+                                                </select>
+                                            </div>
+                                            <div class="col-md-12">
+                                                <button type="submit" class="btn btn-primary">
+                                                    <i class="bi bi-search"></i> Filtrele
+                                                </button>
+                                                <button type="button" class="btn btn-secondary" id="pageFilterTemizle">
+                                                    <i class="bi bi-x-circle"></i> Temizle
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </form>
+                                </div>
+                            </div>
                             <div class="card card-success card-outline">
                                 <div class="card-header">
                                     <h3 class="card-title">Sayfa Listesi</h3>
@@ -568,6 +869,9 @@ $anaMenuler = $db->fetchAll("
                                     <table class="table table-striped table-hover">
                                         <thead>
                                             <tr>
+                                                <?php if ($pagePermissions['can_edit']): ?>
+                                                <th style="width: 40px"></th>
+                                                <?php endif; ?>
                                                 <th style="width: 50px">#</th>
                                                 <th>Sayfa Adı</th>
                                                 <th>URL</th>
@@ -575,13 +879,18 @@ $anaMenuler = $db->fetchAll("
                                                 <th>İkon</th>
                                                 <th style="width: 80px">Sıra</th>
                                                 <th style="width: 100px" class="text-center">Dashboard</th>
-                                                <th style="width: 120px" class="text-center">İşlemler</th>
+                                                <th style="width: 160px" class="text-center">İşlemler</th>
                                             </tr>
                                         </thead>
-                                        <tbody>
+                                        <tbody id="pageTableBody">
                                             <?php foreach ($sayfalar as $index => $sayfa): ?>
-                                            <tr>
-                                                <td><?= $index + 1 ?></td>
+                                            <tr data-id="<?= $sayfa['sayfalar_id'] ?>" data-grup="<?= $sayfa['sayfalar_menu_id'] ?? 0 ?>"
+                                                data-ara="<?= htmlspecialchars($sayfa['sayfalar_sayfa_adi'] . ' ' . $sayfa['sayfalar_sayfa_url']) ?>"
+                                                data-dashboard="<?= $sayfa['sayfalar_dashboard'] ? 1 : 0 ?>">
+                                                <?php if ($pagePermissions['can_edit']): ?>
+                                                <td class="text-center drag-handle" title="Sürükleyerek sırala"><i class="bi bi-grip-vertical"></i></td>
+                                                <?php endif; ?>
+                                                <td class="row-index"><?= $index + 1 ?></td>
                                                 <td><strong><?= htmlspecialchars($sayfa['sayfalar_sayfa_adi']) ?></strong></td>
                                                 <td><code class="text-sm"><?= htmlspecialchars($sayfa['sayfalar_sayfa_url']) ?></code></td>
                                                 <td>
@@ -605,7 +914,7 @@ $anaMenuler = $db->fetchAll("
                                                     <?php endif; ?>
                                                 </td>
                                                 <td class="text-center">
-                                                    <span class="badge text-bg-info"><?= $sayfa['sayfalar_sira_no'] ?? '-' ?></span>
+                                                    <span class="badge text-bg-info sira-badge"><?= $sayfa['sayfalar_sira_no'] ?? '-' ?></span>
                                                 </td>
                                                 <td class="text-center">
                                                     <?php if ($sayfa['sayfalar_dashboard']): ?>
@@ -615,6 +924,9 @@ $anaMenuler = $db->fetchAll("
                                                     <?php endif; ?>
                                                 </td>
                                                 <td class="text-center table-actions">
+                                                    <button class="btn btn-sm btn-info" title="Yetkiler" onclick="yetkiModalAc('sayfa', <?= $sayfa['sayfalar_id'] ?>, <?= htmlspecialchars(json_encode($sayfa['sayfalar_sayfa_adi'])) ?>)">
+                                                        <i class="bi bi-shield-lock"></i>
+                                                    </button>
                                                     <?php if ($pagePermissions['can_edit']): ?>
                                                     <button class="btn btn-sm btn-warning" onclick="editPage(<?= htmlspecialchars(json_encode($sayfa)) ?>)">
                                                         <i class="bi bi-pencil"></i>
@@ -628,9 +940,12 @@ $anaMenuler = $db->fetchAll("
                                                 </td>
                                             </tr>
                                             <?php endforeach; ?>
+                                            <tr class="filtre-bos d-none">
+                                                <td colspan="<?= $pagePermissions['can_edit'] ? 9 : 8 ?>" class="text-center text-muted py-4">Filtreye uygun sayfa bulunamadı</td>
+                                            </tr>
                                             <?php if (empty($sayfalar)): ?>
                                             <tr>
-                                                <td colspan="8" class="text-center text-muted py-4">Henüz sayfa eklenmemiş</td>
+                                                <td colspan="<?= $pagePermissions['can_edit'] ? 9 : 8 ?>" class="text-center text-muted py-4">Henüz sayfa eklenmemiş</td>
                                             </tr>
                                             <?php endif; ?>
                                         </tbody>
@@ -663,8 +978,7 @@ $anaMenuler = $db->fetchAll("
                         </div>
                         <div class="mb-3">
                             <label class="form-label">İkon</label>
-                            <input type="text" class="form-control" name="ikon" placeholder="bi bi-folder">
-                            <small class="text-muted">Bootstrap Icons sınıfı (örn: bi bi-folder)</small>
+                            <select class="ikon-select" name="ikon" id="add_menu_ikon"><option value=""></option></select>
                         </div>
                         <div class="mb-3">
                             <label class="form-label">Üst Menü</label>
@@ -715,7 +1029,7 @@ $anaMenuler = $db->fetchAll("
                         </div>
                         <div class="mb-3">
                             <label class="form-label">İkon</label>
-                            <input type="text" class="form-control" name="ikon" id="edit_ikon" placeholder="bi bi-folder">
+                            <select class="ikon-select" name="ikon" id="edit_ikon"><option value=""></option></select>
                         </div>
                         <div class="mb-3">
                             <label class="form-label">Üst Menü</label>
@@ -788,7 +1102,7 @@ $anaMenuler = $db->fetchAll("
                             </div>
                             <div class="col-md-6 mb-3">
                                 <label class="form-label">İkon</label>
-                                <input type="text" class="form-control" name="ikon" placeholder="bi bi-file-text">
+                                <select class="ikon-select" name="ikon" id="add_sayfa_ikon"><option value=""></option></select>
                             </div>
                         </div>
                         <div class="row">
@@ -858,7 +1172,7 @@ $anaMenuler = $db->fetchAll("
                             </div>
                             <div class="col-md-6 mb-3">
                                 <label class="form-label">İkon</label>
-                                <input type="text" class="form-control" name="ikon" id="edit_sayfa_ikon">
+                                <select class="ikon-select" name="ikon" id="edit_sayfa_ikon"><option value=""></option></select>
                             </div>
                         </div>
                         <div class="row">
@@ -884,17 +1198,85 @@ $anaMenuler = $db->fetchAll("
         </div>
     </div>
 
+    <!-- YETKİ MODAL -->
+    <div class="modal fade" id="yetkiModal" tabindex="-1">
+        <div class="modal-dialog modal-xl">
+            <div class="modal-content">
+                <div class="modal-header bg-info text-white">
+                    <h5 class="modal-title"><i class="bi bi-shield-lock"></i> Yetkiler: <span id="yetkiBaslik"></span></h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="alert alert-light border py-2 small mb-3">
+                        <i class="bi bi-info-circle"></i> Administrator departmanı tüm sayfalara yetki kaydı olmadan erişir.
+                    </div>
+
+                    <div class="table-responsive">
+                        <table class="table table-sm table-bordered table-hover align-middle mb-0">
+                            <thead class="table-light">
+                                <tr>
+                                    <th>Departman</th>
+                                    <?php foreach ($yetkiAlanlari as $baslik): ?>
+                                    <th class="text-center"><?= htmlspecialchars($baslik) ?></th>
+                                    <?php endforeach; ?>
+                                    <th class="text-center">Durum</th>
+                                    <?php if ($pagePermissions['can_delete']): ?>
+                                    <th class="text-center" style="width: 60px">Sil</th>
+                                    <?php endif; ?>
+                                </tr>
+                            </thead>
+                            <tbody id="yetkiTabloBody"></tbody>
+                        </table>
+                    </div>
+
+                    <?php if ($pagePermissions['can_add']): ?>
+                    <hr>
+                    <h6 class="mb-3"><i class="bi bi-plus-circle"></i> Yeni Yetki Ekle</h6>
+                    <form id="yetkiEkleForm">
+                        <div class="row g-3 align-items-end">
+                            <div class="col-md-5">
+                                <label class="form-label">Departman <span class="text-danger">*</span></label>
+                                <select class="yetki-departman-select" id="yetki_departman" name="departman_id[]" multiple></select>
+                            </div>
+                            <div class="col-md-7">
+                                <div class="d-flex flex-wrap gap-3">
+                                    <?php foreach ($yetkiAlanlari as $alan => $baslik): ?>
+                                    <div class="form-check form-switch">
+                                        <input class="form-check-input" type="checkbox" role="switch" id="yetki_yeni_<?= $alan ?>" name="<?= $alan ?>" value="1" <?= $alan === 'gor' ? 'checked' : '' ?>>
+                                        <label class="form-check-label" for="yetki_yeni_<?= $alan ?>"><?= htmlspecialchars($baslik) ?></label>
+                                    </div>
+                                    <?php endforeach; ?>
+                                </div>
+                            </div>
+                            <div class="col-12 text-end">
+                                <button type="submit" class="btn btn-info"><i class="bi bi-plus-circle"></i> Yetki Ekle</button>
+                            </div>
+                        </div>
+                    </form>
+                    <?php endif; ?>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script src="https://code.jquery.com/jquery-3.7.1.min.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@popperjs/core@2.11.8/dist/umd/popper.min.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.7/dist/js/bootstrap.min.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11/dist/sweetalert2.all.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.6/Sortable.min.js"></script>
     <script src="/Admin/assets/js/Adminlte.min.js"></script>
     <script src="/Admin/assets/js/custom.js"></script>
     
     <script>
         // Sayfa yetkileri
         const permissions = <?= json_encode($pagePermissions) ?>;
+
+        // Sistemde kullanılan ikonlar (Menuler + Menu_Sayfalar)
+        const kullanilanIkonlar = <?= json_encode(array_values(array_unique(array_filter(array_merge(
+            array_column($menuler, 'menuler_ikon'),
+            array_column($sayfalar, 'sayfalar_ikon')
+        ))))) ?>;
         
         // istatistikleri yçkle
         function loadStats() {
@@ -940,17 +1322,327 @@ $anaMenuler = $db->fetchAll("
             });
         }
         
+        // İKON SEÇİMİ
+        // Liste, sayfanın yüklediği bootstrap-icons sürümünün kendi ikon listesinden gelir
+        const IKON_JSON = 'https://cdn.jsdelivr.net/npm/bootstrap-icons@1.13.1/font/bootstrap-icons.json';
+
+        function ikonSablon(item) {
+            if (!item.id) return item.text;
+            return $('<span>').append($('<i>').attr('class', item.id).addClass('me-2'), document.createTextNode(item.text));
+        }
+
+        function initIkonSelect() {
+            fetch(IKON_JSON)
+                .then(r => r.json())
+                .then(json => Object.keys(json).map(ad => 'bi bi-' + ad))
+                .catch(() => {
+                    showToast('İkon listesi yüklenemedi, yalnız kullanılan ikonlar listelendi', 'warning');
+                    return [];
+                })
+                .then(tumIkonlar => {
+                    const kullanilan = kullanilanIkonlar.slice().sort();
+                    const data = [];
+                    if (kullanilan.length) {
+                        data.push({ text: 'Sistemde Kullanılanlar', children: kullanilan.map(v => ({ id: v, text: v })) });
+                    }
+                    const digerleri = tumIkonlar.filter(v => !kullanilan.includes(v));
+                    if (digerleri.length) {
+                        data.push({ text: 'Tüm İkonlar', children: digerleri.map(v => ({ id: v, text: v })) });
+                    }
+
+                    $('.ikon-select').each(function() {
+                        const $sel = $(this);
+                        const mevcut = $sel.val();
+                        if ($sel.hasClass('select2-hidden-accessible')) $sel.select2('destroy');
+                        $sel.find('option[value!=""]').remove();
+                        $sel.select2({
+                            theme: 'bootstrap-5',
+                            width: '100%',
+                            placeholder: 'İkon seçiniz...',
+                            allowClear: true,
+                            dropdownParent: $sel.closest('.modal'),
+                            data: data,
+                            templateResult: ikonSablon,
+                            templateSelection: ikonSablon,
+                            language: {
+                                noResults: function() { return "Sonuç bulunamadi"; },
+                                searching: function() { return "Araniyor..."; }
+                            }
+                        });
+                        if (mevcut) ikonSec($sel, mevcut);
+                    });
+                });
+        }
+
+        // Listede olmayan (eski) bir değer gelirse seçenek olarak eklenir, kayıt kaybolmaz
+        function ikonSec(selector, deger) {
+            const $sel = $(selector);
+            deger = deger || '';
+            if (deger && !$sel.find('option').filter((i, o) => o.value === deger).length) {
+                $sel.append(new Option(deger, deger, false, false));
+            }
+            $sel.val(deger).trigger('change');
+        }
+
+        // YETKİ MODALI
+        const yetkiAlanlari = <?= json_encode($yetkiAlanlari) ?>;
+        const departmanlar = <?= json_encode($departmanlar) ?>;
+        let yetkiKayit = { tip: '', id: 0 };
+
+        function htmlKacir(str) {
+            return $('<div>').text(str ?? '').html();
+        }
+
+        function yetkiModalAc(tip, id, ad) {
+            yetkiKayit = { tip: tip, id: id };
+            $('#yetkiBaslik').text((tip === 'menu' ? 'Menü - ' : 'Sayfa - ') + ad);
+            yetkiListele();
+            bootstrap.Modal.getOrCreateInstance(document.getElementById('yetkiModal')).show();
+        }
+
+        function yetkiListele() {
+            const colspan = Object.keys(yetkiAlanlari).length + 2 + (permissions.can_delete ? 1 : 0);
+            $('#yetkiTabloBody').html(`<tr><td colspan="${colspan}" class="text-center text-muted py-3">Yükleniyor...</td></tr>`);
+
+            $.post('', { ajax_action: 'yetki_liste', tip: yetkiKayit.tip, kayit_id: yetkiKayit.id }, response => {
+                if (!response.success) {
+                    showToast(response.message, 'error');
+                    return;
+                }
+
+                const satirlar = response.data;
+                if (!satirlar.length) {
+                    $('#yetkiTabloBody').html(`<tr><td colspan="${colspan}" class="text-center text-muted py-3">Henüz yetki verilmemiş</td></tr>`);
+                } else {
+                    $('#yetkiTabloBody').html(satirlar.map(y => {
+                        const anahtar = (alan) => `
+                            <td>
+                                <div class="form-check form-switch d-flex justify-content-center">
+                                    <input class="form-check-input yetki-toggle" type="checkbox" role="switch"
+                                        id="yetki_${y.yetki_id}_${alan}" data-id="${y.yetki_id}" data-alan="${alan}"
+                                        ${y[alan] == 1 ? 'checked' : ''} ${permissions.can_edit ? '' : 'disabled'}>
+                                    <label class="form-check-label" for="yetki_${y.yetki_id}_${alan}"></label>
+                                </div>
+                            </td>`;
+                        return `
+                            <tr class="${y.durum == 1 ? '' : 'table-secondary'}">
+                                <td><strong>${htmlKacir(y.departman_adi || ('#' + y.departman_id))}</strong></td>
+                                ${Object.keys(yetkiAlanlari).map(anahtar).join('')}
+                                ${anahtar('durum')}
+                                ${permissions.can_delete ? `
+                                <td class="text-center">
+                                    <button type="button" class="btn btn-sm btn-danger" onclick="yetkiSil(${y.yetki_id}, ${htmlKacir(JSON.stringify(y.departman_adi || ''))})">
+                                        <i class="bi bi-trash"></i>
+                                    </button>
+                                </td>` : ''}
+                            </tr>`;
+                    }).join(''));
+                }
+
+                yetkiDepartmanSelectYenile(satirlar.map(y => String(y.departman_id)));
+            }).fail(xhr => showToast(xhr.responseJSON?.message || 'Sunucuya ulaşılamıyor', 'error'));
+        }
+
+        // Zaten yetkisi olan departmanlar listeden çıkarılır (sıra: close+destroy → html → init)
+        function yetkiDepartmanSelectYenile(mevcutlar) {
+            const $sel = $('#yetki_departman');
+            if (!$sel.length) return;
+
+            if ($sel.hasClass('select2-hidden-accessible')) {
+                $sel.select2('close');
+                $sel.select2('destroy');
+            }
+            $sel.html(departmanlar
+                .filter(d => !mevcutlar.includes(String(d.departman_id)))
+                .map(d => `<option value="${d.departman_id}">${htmlKacir(d.departman_adi)}</option>`)
+                .join(''));
+            $sel.select2({
+                theme: 'bootstrap-5',
+                width: '100%',
+                placeholder: 'Departman seçiniz...',
+                dropdownParent: $('#yetkiModal'),
+                closeOnSelect: false,
+                language: {
+                    noResults: function() { return "Yetkisi olmayan departman kalmadı"; },
+                    searching: function() { return "Araniyor..."; }
+                }
+            });
+        }
+
+        $(document).on('change', '.yetki-toggle', function() {
+            const $chk = $(this);
+            $.post('', {
+                ajax_action: 'yetki_guncelle',
+                yetki_id: $chk.data('id'),
+                alan: $chk.data('alan'),
+                deger: $chk.is(':checked') ? 1 : 0
+            }, response => {
+                showToast(response.message, response.success ? 'success' : 'error');
+                if ($chk.data('alan') === 'durum') {
+                    $chk.closest('tr').toggleClass('table-secondary', !$chk.is(':checked'));
+                }
+            }).fail(xhr => {
+                $chk.prop('checked', !$chk.is(':checked'));
+                showToast(xhr.responseJSON?.message || 'Sunucuya ulaşılamıyor', 'error');
+            });
+        });
+
+        function yetkiSil(id, departman) {
+            confirmAction(
+                `"${departman}" departmanının yetkisini silmek istediğinize emin misiniz?`,
+                'Bu departman bu sayfaya erişemeyecek.',
+                function() {
+                    $.post('', { ajax_action: 'yetki_sil', yetki_id: id }, response => {
+                        showToast(response.message, response.success ? 'success' : 'error');
+                        yetkiListele();
+                    }).fail(xhr => showToast(xhr.responseJSON?.message || 'Sunucuya ulaşılamıyor', 'error'));
+                }
+            );
+        }
+
+        $('#yetkiEkleForm').on('submit', function(e) {
+            e.preventDefault();
+            const formData = new FormData(this);
+            formData.append('ajax_action', 'yetki_ekle');
+            formData.append('tip', yetkiKayit.tip);
+            formData.append('kayit_id', yetkiKayit.id);
+
+            fetch('', { method: 'POST', body: formData })
+                .then(r => r.json())
+                .then(data => {
+                    showToast(data.message, data.success ? 'success' : 'error');
+                    if (data.success) yetkiListele();
+                })
+                .catch(() => showToast('Sunucuya ulaşılamıyor', 'error'));
+        });
+
+        // SÜRÜKLE-BIRAK SIRALAMA
+        function initSortable(tbodyId, ajaxAction) {
+            const tbody = document.getElementById(tbodyId);
+            if (!tbody || !permissions.can_edit) {
+                return;
+            }
+
+            Sortable.create(tbody, {
+                handle: '.drag-handle',
+                animation: 150,
+                ghostClass: 'sortable-ghost',
+                chosenClass: 'sortable-chosen',
+                dragClass: 'sortable-drag',
+                // Sadece ayni grup icinde tasimaya izin ver
+                onMove: function(evt) {
+                    return evt.dragged.dataset.grup === evt.related.dataset.grup;
+                },
+                onEnd: function(evt) {
+                    if (evt.oldIndex === evt.newIndex) {
+                        return;
+                    }
+                    kaydetSiralama(tbody, ajaxAction);
+                }
+            });
+        }
+
+        function kaydetSiralama(tbody, ajaxAction) {
+            const satirlar = tbody.querySelectorAll('tr[data-id]');
+            const grupSayaci = {};
+            const siralar = [];
+
+            satirlar.forEach((tr, i) => {
+                const grup = tr.dataset.grup;
+                grupSayaci[grup] = (grupSayaci[grup] || 0) + 1;
+                const sira = grupSayaci[grup];
+
+                siralar.push({ id: parseInt(tr.dataset.id), sira: sira });
+
+                // Ekrandaki sira ve satir numarasini guncelle
+                const badge = tr.querySelector('.sira-badge');
+                if (badge) badge.textContent = sira;
+                const idx = tr.querySelector('.row-index');
+                if (idx) idx.textContent = i + 1;
+            });
+
+            const formData = new FormData();
+            formData.append('ajax_action', ajaxAction);
+            formData.append('siralar', JSON.stringify(siralar));
+
+            fetch('', { method: 'POST', body: formData })
+                .then(r => r.json())
+                .then(data => {
+                    showToast(data.message, data.success ? 'success' : 'error');
+                })
+                .catch(() => showToast('Sunucuya ulaşılamıyor', 'error'));
+        }
+
+        // FiLTRE
+        function filtreUygula(tbodyId, ara, kosullar) {
+            const tbody = document.getElementById(tbodyId);
+            const aranan = ara.trim().toLocaleLowerCase('tr-TR');
+            let gorunen = 0;
+
+            tbody.querySelectorAll('tr[data-id]').forEach(tr => {
+                let uygun = !aranan || tr.dataset.ara.toLocaleLowerCase('tr-TR').includes(aranan);
+                Object.keys(kosullar).forEach(alan => {
+                    if (kosullar[alan] !== '' && kosullar[alan] !== null && tr.dataset[alan] !== kosullar[alan]) {
+                        uygun = false;
+                    }
+                });
+                tr.classList.toggle('d-none', !uygun);
+                if (uygun) gorunen++;
+            });
+
+            const bos = tbody.querySelector('.filtre-bos');
+            if (bos) bos.classList.toggle('d-none', gorunen > 0 || !tbody.querySelector('tr[data-id]'));
+        }
+
+        function menuFiltrele() {
+            filtreUygula('menuTableBody', $('#filter_menu_ara').val(), {
+                grup: $('#filter_menu_ust').val(),
+                header: $('#filter_menu_header').val()
+            });
+        }
+
+        function sayfaFiltrele() {
+            filtreUygula('pageTableBody', $('#filter_sayfa_ara').val(), {
+                grup: $('#filter_sayfa_menu').val(),
+                dashboard: $('#filter_sayfa_dashboard').val()
+            });
+        }
+
+        function initFiltreler() {
+            $('#menuFilterForm').on('submit', e => { e.preventDefault(); menuFiltrele(); });
+            $('#filter_menu_ara').on('input', menuFiltrele);
+            $('#filter_menu_ust, #filter_menu_header').on('change', menuFiltrele);
+            $('#menuFilterTemizle').on('click', () => {
+                $('#filter_menu_ara').val('');
+                $('#filter_menu_ust, #filter_menu_header').val('').trigger('change');
+                showToast('Filtreler temizlendi', 'info');
+            });
+
+            $('#pageFilterForm').on('submit', e => { e.preventDefault(); sayfaFiltrele(); });
+            $('#filter_sayfa_ara').on('input', sayfaFiltrele);
+            $('#filter_sayfa_menu, #filter_sayfa_dashboard').on('change', sayfaFiltrele);
+            $('#pageFilterTemizle').on('click', () => {
+                $('#filter_sayfa_ara').val('');
+                $('#filter_sayfa_menu, #filter_sayfa_dashboard').val('').trigger('change');
+                showToast('Filtreler temizlendi', 'info');
+            });
+        }
+
         // Sayfa hazir
         $(document).ready(() => {
             loadStats();
             initSelect2();
+            initSortable('menuTableBody', 'menu_reorder');
+            initSortable('pageTableBody', 'page_reorder');
+            initFiltreler();
+            initIkonSelect();
         });
         
         // Menü Fonksiyonları
         function editMenu(menu) {
             document.getElementById('edit_menu_id').value = menu.menuler_id;
             document.getElementById('edit_menu_adi').value = menu.menuler_menu_adi;
-            document.getElementById('edit_ikon').value = menu.menuler_ikon || '';
+            ikonSec('#edit_ikon', menu.menuler_ikon);
             document.getElementById('edit_parent_id').value = menu.menuler_parent_id || '';
             document.getElementById('edit_sira_no').value = menu.menuler_sira_no || 0;
             document.getElementById('edit_header_goster').checked = menu.menuler_header_goster == 1;
@@ -996,7 +1688,7 @@ $anaMenuler = $db->fetchAll("
             document.getElementById('edit_sayfa_url').value = sayfa.sayfalar_sayfa_url;
             document.getElementById('edit_aciklama').value = sayfa.sayfalar_aciklama || '';
             document.getElementById('edit_menu_id_select').value = sayfa.menuler_id;
-            document.getElementById('edit_sayfa_ikon').value = sayfa.sayfalar_ikon || '';
+            ikonSec('#edit_sayfa_ikon', sayfa.sayfalar_ikon);
             document.getElementById('edit_sayfa_sira_no').value = sayfa.sayfalar_sira_no || 0;
             document.getElementById('edit_dashboard_check').checked = sayfa.sayfalar_dashboard == 1;
             
