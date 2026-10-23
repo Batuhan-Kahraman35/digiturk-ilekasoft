@@ -491,7 +491,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if ($minLead !== '' && (int)$minLead > 0) { $where[] = 'ISNULL(ld.adet, 0) >= ?'; $params[] = (int)$minLead; }
                 if ($sonLead === 'yok')      { $where[] = 'ld.son IS NULL'; }
                 elseif ($sonLead !== '' && (int)$sonLead > 0) {
-                    $where[] = 'ld.son >= DATEADD(DAY, ?, CAST(GETDATE() AS DATE))'; $params[] = -(int)$sonLead;
+                    $where[] = 'ld.son >= DATEADD(DAY, ?, CAST(GETDATE() AS DATE))'; $params[] = 1 - (int)$sonLead; // N = bugün dahil son N gün
                 }
                 if ($birimFiltre !== '') {
                     $where[] = "EXISTS (SELECT 1 FROM KullaniciBirimYetkileri kbf
@@ -544,7 +544,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if ($minLead !== '' && (int)$minLead > 0) { $where[] = 'ISNULL(ld.adet, 0) >= ?'; $params[] = (int)$minLead; }
                 if ($sonLead === 'yok')      { $where[] = 'ld.son IS NULL'; }
                 elseif ($sonLead !== '' && (int)$sonLead > 0) {
-                    $where[] = 'ld.son >= DATEADD(DAY, ?, CAST(GETDATE() AS DATE))'; $params[] = -(int)$sonLead;
+                    $where[] = 'ld.son >= DATEADD(DAY, ?, CAST(GETDATE() AS DATE))'; $params[] = 1 - (int)$sonLead; // N = bugün dahil son N gün
                 }
                 if ($esleme === 'var') { $where[] = 'ISNULL(es.eslenen, 0) > 0'; }
                 elseif ($esleme === 'yok') { $where[] = 'ISNULL(es.eslenen, 0) = 0'; }
@@ -2141,7 +2141,10 @@ function sonLeadMetni(tarih) {
     const t = new Date(String(tarih).replace(' ', 'T'));
     if (isNaN(t)) return '<span class="text-muted">—</span>';
 
-    const gun = Math.floor((Date.now() - t.getTime()) / 86400000);
+    // Takvim günü farkı (24 saatlik dilim değil): dünkü lead 23 saat önce gelse de "dün"
+    const bugun = new Date(); bugun.setHours(0, 0, 0, 0);
+    const gunBasi = new Date(t); gunBasi.setHours(0, 0, 0, 0);
+    const gun = Math.round((bugun - gunBasi) / 86400000);
     let ek;
     if (gun <= 0)      ek = '<span class="badge text-bg-success ms-1">bugün</span>';
     else if (gun === 1) ek = '<span class="badge text-bg-success ms-1">dün</span>';
