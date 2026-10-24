@@ -783,7 +783,9 @@ function zamanlamaAc(gorevId, zamanlamaId) {
         document.getElementById('zamanlamaBaslik').textContent = 'Yeni Zamanlayıcı';
         document.getElementById('z_ad').value      = '';
         document.getElementById('z_cron').value    = '';
-        document.getElementById('z_baslangic').value = new Date().toISOString().slice(0, 16);
+        // toISOString UTC döner; yerel saate (UTC+3) çevir
+        const simdi = new Date(); simdi.setMinutes(simdi.getMinutes() - simdi.getTimezoneOffset());
+        document.getElementById('z_baslangic').value = simdi.toISOString().slice(0, 16);
         document.getElementById('z_bitis').value     = '';
         telafiAlaniDoldur(null);
         renderZamanlamaParams(params, {});

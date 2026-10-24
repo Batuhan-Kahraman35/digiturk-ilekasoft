@@ -4379,6 +4379,244 @@ function gorevVoipIslemler(array $params, $db): array
     };
 }
 
+/**
+ * Meta kısıtlama izleme: reklam hesaplarının account_status/disable_reason değerini ve
+ * sayfaların erişilebilirliğini Graph'tan kontrol eder; meta-kisitlama-takibi.php olaylarını
+ * otomatik açar/kapatır ve değişiklikleri tek mail ile bildirir.
+ *  - Hesap aktif değil + açık olay yok      → olay açılır (Otomatik=1)
+ *  - Açık olayın Meta kodu değişti          → harekete yazılır, kod güncellenir
+ *  - Hesap/sayfa tekrar erişilebilir        → açık OTOMATİK olay ilk kapanış durumuna çekilir
+ *                                             (elle açılan olaya yalnız hareket yazılır)
+ * params: alicilar (virgülle e-posta; boşsa site ayarı admin_email), mail_kanal (e-posta kanal id),
+ *         tum_hesaplar (1 = pasif kayıtlı hesaplar da), dry (1 = DB/mail yok)
+ */
+function gorevMetaKisitlamaIzle(array $params, $db): array
+{
+    ob_start();
+    set_time_limit(600);
+
+    $isDry = !empty($params['dry']);
+    $L = function (string $m) use ($isDry) {
+        echo '[' . date('H:i:s') . '] ' . ($isDry ? '[DRY] ' : '') . $m . PHP_EOL;
+    };
+
+    // Meta API sabitleri (DB'de tutulmaz)
+    $hesapDurumlari = [1 => 'ACTIVE', 2 => 'DISABLED', 3 => 'UNSETTLED', 7 => 'PENDING_RISK_REVIEW', 8 => 'PENDING_SETTLEMENT',
+                       9 => 'IN_GRACE_PERIOD', 100 => 'PENDING_CLOSURE', 101 => 'CLOSED', 201 => 'ANY_ACTIVE', 202 => 'ANY_CLOSED'];
+    $kapanmaSebepleri = [1 => 'ADS_INTEGRITY_POLICY', 2 => 'ADS_IP_REVIEW', 3 => 'RISK_PAYMENT', 4 => 'GRAY_ACCOUNT_SHUT_DOWN',
+                         5 => 'ADS_AFC_REVIEW', 6 => 'BUSINESS_INTEGRITY_RAR', 7 => 'PERMANENT_CLOSE', 8 => 'UNUSED_RESELLER_ACCOUNT',
+                         9 => 'UNUSED_ACCOUNT', 10 => 'UMBRELLA_AD_ACCOUNT', 11 => 'BUSINESS_MANAGER_INTEGRITY_POLICY',
+                         12 => 'MISREPRESENTED_AD_ACCOUNT', 13 => 'AOAB_DESHARE_LEGAL_ENTITY', 14 => 'CTX_THREAD_REVIEW',
+                         15 => 'COMPROMISED_AD_ACCOUNT'];
+
+    $sonuc = ''; $durum = 1;
+    try {
+        require_once __DIR__ . '/../admin/includes/EntegrasyonHelper.php';
+
+        $mailKanal   = isset($params['mail_kanal']) && $params['mail_kanal'] !== '' ? (int)$params['mail_kanal'] : 2;
+        $alicilar    = array_values(array_filter(array_map('trim', explode(',', (string)($params['alicilar'] ?? '')))));
+        if (!$alicilar && siteAyar('admin_email')) $alicilar = [siteAyar('admin_email')];
+        $tumHesaplar = !empty($params['tum_hesaplar']);
+
+        $kanal = $db->fetchOne("
+            SELECT k.EntegrasyonKanallari_Sifre AS Token, e.Entegrasyonlar_BaseURL AS BaseURL, e.Entegrasyonlar_ApiKey AS AppSecret
+            FROM EntegrasyonKanallari k
+            INNER JOIN Entegrasyonlar e ON k.EntegrasyonKanallari_Entegrasyon_id = e.Entegrasyonlar_id
+            WHERE e.Entegrasyonlar_Tip = 'meta' AND k.Durum = 1 AND e.Durum = 1
+            ORDER BY k.EntegrasyonKanallari_id
+        ");
+        if (!$kanal) throw new RuntimeException('Aktif Meta kanalı bulunamadı (EntegrasyonKanallari).');
+        $baseURL = rtrim($kanal['BaseURL'], '/');
+        $secret  = (string)$kanal['AppSecret'];
+
+        // Graph GET: ['ok'=>bool, 'data'=>array, 'hata'=>?string (yalnız Graph error nesnesi varsa)]
+        $graph = function (string $yol, array $q, string $token) use ($baseURL, $secret): array {
+            $q['access_token']    = $token;
+            $q['appsecret_proof'] = hash_hmac('sha256', $token, $secret);
+            $ch = curl_init($baseURL . '/' . $yol . '?' . http_build_query($q));
+            curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 30, CURLOPT_SSL_VERIFYPEER => false]);
+            $c = curl_exec($ch); $err = curl_error($ch);
+            $j = json_decode((string)$c, true) ?: [];
+            if (isset($j['error'])) {
+                $e = $j['error'];
+                return ['ok' => false, 'data' => $j, 'hata' => '#' . ($e['code'] ?? '?') . (isset($e['error_subcode']) ? '/' . $e['error_subcode'] : '') . ' ' . ($e['message'] ?? '')];
+            }
+            return ['ok' => !$err && $c !== false, 'data' => $j, 'hata' => null, 'ag' => $err];
+        };
+
+        // Tanım ID'leri (isim yerine sıra/kod ile)
+        $vtHesap = (int)($db->fetchOne("SELECT tanim_MetaVarlikTurleri_id AS id FROM tanim_MetaVarlikTurleri WHERE tanim_MetaVarlikTurleri_Kod = 'hesap'")['id'] ?? 0);
+        $vtSayfa = (int)($db->fetchOne("SELECT tanim_MetaVarlikTurleri_id AS id FROM tanim_MetaVarlikTurleri WHERE tanim_MetaVarlikTurleri_Kod = 'sayfa'")['id'] ?? 0);
+        $dYeni   = (int)($db->fetchOne("SELECT TOP 1 tanim_MetaOlayDurumlari_id AS id FROM tanim_MetaOlayDurumlari WHERE Durum = 1 AND tanim_MetaOlayDurumlari_Kapanis = 0 ORDER BY tanim_MetaOlayDurumlari_Sira")['id'] ?? 0);
+        $dKapali = (int)($db->fetchOne("SELECT TOP 1 tanim_MetaOlayDurumlari_id AS id FROM tanim_MetaOlayDurumlari WHERE Durum = 1 AND tanim_MetaOlayDurumlari_Kapanis = 1 ORDER BY tanim_MetaOlayDurumlari_Sira")['id'] ?? 0);
+        $otAski  = (int)($db->fetchOne("SELECT TOP 1 tanim_MetaOlayTurleri_id AS id FROM tanim_MetaOlayTurleri WHERE Durum = 1 ORDER BY tanim_MetaOlayTurleri_Sira")['id'] ?? 0);
+        $otOdeme = (int)($db->fetchOne("SELECT TOP 1 tanim_MetaOlayTurleri_id AS id FROM tanim_MetaOlayTurleri WHERE Durum = 1 AND tanim_MetaOlayTurleri_Adi LIKE N'%Ödeme%' ORDER BY tanim_MetaOlayTurleri_Sira")['id'] ?? $otAski);
+        if (!$vtHesap || !$vtSayfa || !$dYeni || !$dKapali || !$otAski) throw new RuntimeException('Meta kısıtlama tanım tabloları eksik.');
+
+        $simdi = date('Y-m-d H:i:s');
+        $bildirimler = []; // ['tur' => 'acildi'|'degisti'|'duzeldi', 'varlik' => ..., 'detay' => ...]
+
+        $acikOlay = function (string $kolon, int $id) use ($db) {
+            return $db->fetchOne("
+                SELECT TOP 1 o.MetaKisitlamaOlaylari_id AS id, o.MetaKisitlamaOlaylari_MetaKodu AS kod, o.MetaKisitlamaOlaylari_Otomatik AS oto
+                FROM MetaKisitlamaOlaylari o
+                INNER JOIN tanim_MetaOlayDurumlari d ON d.tanim_MetaOlayDurumlari_id = o.MetaKisitlamaOlaylari_OlayDurumu_id
+                WHERE o.$kolon = ? AND o.Durum = 1 AND d.tanim_MetaOlayDurumlari_Kapanis = 0
+                ORDER BY o.MetaKisitlamaOlaylari_id DESC
+            ", [$id]);
+        };
+        $hareket = function (int $olayId, string $aciklama, ?int $durumId = null) use ($db, $simdi, $isDry) {
+            if ($isDry) return;
+            $db->insert('MetaKisitlamaHareketleri', [
+                'MetaKisitlamaHareketleri_Olay_id'       => $olayId,
+                'MetaKisitlamaHareketleri_Tarih'         => $simdi,
+                'MetaKisitlamaHareketleri_OlayDurumu_id' => $durumId,
+                'MetaKisitlamaHareketleri_Aciklama'      => $aciklama,
+                'OlusturanKullanici' => null, 'OlusturmaTarihi' => $simdi,
+            ]);
+        };
+        // Ortak karar: $sorunlu=true → aç/güncelle, false → düzelt
+        $isle = function (string $kolon, int $vt, int $kayitId, string $ad, bool $sorunlu, string $kod, string $aciklama, int $olayTuru)
+            use ($db, $acikOlay, $hareket, $simdi, $isDry, $dYeni, $dKapali, &$bildirimler, $L) {
+            $olay = $acikOlay($kolon, $kayitId);
+            if ($sorunlu && !$olay) {
+                $L("✗ $ad: $kod → yeni olay");
+                if (!$isDry) {
+                    $yeniId = $db->insert('MetaKisitlamaOlaylari', [
+                        'MetaKisitlamaOlaylari_VarlikTuru_id' => $vt,
+                        $kolon                                => $kayitId,
+                        'MetaKisitlamaOlaylari_OlayTuru_id'   => $olayTuru,
+                        'MetaKisitlamaOlaylari_OlayDurumu_id' => $dYeni,
+                        'MetaKisitlamaOlaylari_OlayTarihi'    => $simdi,
+                        'MetaKisitlamaOlaylari_MetaKodu'      => mb_substr($kod, 0, 50),
+                        'MetaKisitlamaOlaylari_Aciklama'      => $aciklama,
+                        'MetaKisitlamaOlaylari_Otomatik'      => 1,
+                        'OlusturanKullanici' => null, 'OlusturmaTarihi' => $simdi,
+                    ]);
+                    $hareket((int)$yeniId, 'Otomatik izleme: ' . $aciklama, $dYeni);
+                }
+                $bildirimler[] = ['tur' => 'acildi', 'varlik' => $ad, 'detay' => $aciklama];
+            } elseif ($sorunlu && $olay && (string)$olay['kod'] !== mb_substr($kod, 0, 50)) {
+                $eskiKod = (string)$olay['kod'] !== '' ? $olay['kod'] : '-';
+                $L("~ $ad: $eskiKod → $kod");
+                if (!$isDry) {
+                    $hareket((int)$olay['id'], "Otomatik izleme: Meta durumu değişti ($eskiKod → $kod). $aciklama");
+                    $db->update('MetaKisitlamaOlaylari', ['MetaKisitlamaOlaylari_MetaKodu' => mb_substr($kod, 0, 50), 'GuncellemeTarihi' => $simdi],
+                        ['MetaKisitlamaOlaylari_id' => $olay['id']]);
+                }
+                $bildirimler[] = ['tur' => 'degisti', 'varlik' => $ad, 'detay' => "$eskiKod → $kod. $aciklama"];
+            } elseif (!$sorunlu && $olay && (string)$olay['kod'] !== 'ACTIVE') {
+                $L("✓ $ad: tekrar erişilebilir");
+                if (!$isDry) {
+                    if ((int)$olay['oto'] === 1) {
+                        $hareket((int)$olay['id'], 'Otomatik izleme: varlık tekrar aktif, olay kapatıldı.', $dKapali);
+                        $db->update('MetaKisitlamaOlaylari', [
+                            'MetaKisitlamaOlaylari_OlayDurumu_id' => $dKapali,
+                            'MetaKisitlamaOlaylari_KapanisTarihi' => $simdi,
+                            'MetaKisitlamaOlaylari_MetaKodu'      => 'ACTIVE',
+                            'GuncellemeTarihi' => $simdi,
+                        ], ['MetaKisitlamaOlaylari_id' => $olay['id']]);
+                    } else {
+                        // Elle açılan olay kapatılmaz; tekrar yazmamak için kod ACTIVE işaretlenir
+                        $hareket((int)$olay['id'], 'Otomatik izleme: varlık tekrar aktif görünüyor. Olayı kontrol edip kapatın.');
+                        $db->update('MetaKisitlamaOlaylari', ['MetaKisitlamaOlaylari_MetaKodu' => 'ACTIVE', 'GuncellemeTarihi' => $simdi],
+                            ['MetaKisitlamaOlaylari_id' => $olay['id']]);
+                    }
+                }
+                $bildirimler[] = ['tur' => 'duzeldi', 'varlik' => $ad, 'detay' => (int)$olay['oto'] === 1 ? 'Olay otomatik kapatıldı.' : 'Elle açılan olay; kontrol edip kapatın.'];
+            }
+        };
+
+        // 1) Reklam hesapları (system user token)
+        $hesaplar = $db->fetchAll("
+            SELECT ReklamHesaplari_id AS id, ReklamHesaplari_HesapAdi AS ad, ReklamHesaplari_HesapID AS ext
+            FROM ReklamHesaplari
+            WHERE ReklamHesaplari_HesapID LIKE 'act[_]%'" . ($tumHesaplar ? '' : ' AND Durum = 1'));
+        $hSay = 0; $hHata = 0;
+        foreach ($hesaplar as $h) {
+            $r = $graph($h['ext'], ['fields' => 'id,name,account_status,disable_reason'], (string)$kanal['Token']);
+            if (!$r['ok']) { $hHata++; $L("? {$h['ad']}: okunamadı " . ($r['hata'] ?? $r['ag'] ?? '')); continue; }
+            $hSay++;
+            $st  = (int)($r['data']['account_status'] ?? 0);
+            $dr  = (int)($r['data']['disable_reason'] ?? 0);
+            $kod = ($hesapDurumlari[$st] ?? (string)$st) . ($dr ? '/' . ($kapanmaSebepleri[$dr] ?? $dr) : '');
+            $aciklama = "Hesap durumu: $kod (account_status=$st" . ($dr ? ", disable_reason=$dr" : '') . ')';
+            $olayTuru = in_array($st, [3, 8, 9], true) ? $otOdeme : $otAski;
+            $isle('MetaKisitlamaOlaylari_ReklamHesap_id', $vtHesap, (int)$h['id'], $h['ad'] . " ({$h['ext']})", $st !== 1, $kod, $aciklama, $olayTuru);
+            if (!$isDry) $db->update('ReklamHesaplari', ['ReklamHesaplari_HesapDurumu' => $st], ['ReklamHesaplari_id' => $h['id']]);
+        }
+        $L("Hesaplar: $hSay kontrol edildi, $hHata okunamadı.");
+
+        // 2) Facebook sayfaları (sayfa token'ı olanlar). Yalnız Graph error nesnesi sorun sayılır; ağ hatası atlanır.
+        $sayfalar = $db->fetchAll("
+            SELECT ReklamFacebookSayfalari_id AS id, ReklamFacebookSayfalari_SayfaAdi AS ad, ReklamFacebookSayfalari_SayfaID AS ext,
+                   ReklamFacebookSayfalari_Token AS token
+            FROM ReklamFacebookSayfalari
+            WHERE Durum = 1 AND ISNULL(ReklamFacebookSayfalari_Token, '') <> ''
+              AND ReklamFacebookSayfalari_SayfaID <> '' AND ReklamFacebookSayfalari_SayfaID NOT LIKE '%[^0-9]%'
+        ");
+        $sSay = 0;
+        foreach ($sayfalar as $s) {
+            $r = $graph($s['ext'], ['fields' => 'id,name,is_published'], (string)$s['token']);
+            if (!$r['ok'] && !$r['hata']) { $L("? {$s['ad']}: ağ hatası, atlandı"); continue; }
+            $sSay++;
+            if ($r['hata']) {
+                $sorunlu = true; $kod = 'GRAPH ' . strtok($r['hata'], ' ');
+                $aciklama = 'Sayfaya erişilemedi (olası kısıtlama veya token sorunu): ' . $r['hata'];
+            } elseif (isset($r['data']['is_published']) && !$r['data']['is_published']) {
+                $sorunlu = true; $kod = 'UNPUBLISHED';
+                $aciklama = 'Sayfa yayında değil (is_published=false).';
+            } else {
+                $sorunlu = false; $kod = 'ACTIVE'; $aciklama = '';
+            }
+            $isle('MetaKisitlamaOlaylari_FacebookSayfa_id', $vtSayfa, (int)$s['id'], $s['ad'] . " ({$s['ext']})", $sorunlu, $kod, $aciklama, $otAski);
+        }
+        $L("Sayfalar: $sSay kontrol edildi.");
+
+        // 3) Bildirim
+        if (!$bildirimler) {
+            $sonuc = "Değişiklik yok ($hSay hesap, $sSay sayfa kontrol edildi" . ($hHata ? ", $hHata hesap okunamadı" : '') . ').';
+        } else {
+            $basliklar = ['acildi' => ['Yeni kısıtlama', '#dc3545'], 'degisti' => ['Durum değişti', '#fd7e14'], 'duzeldi' => ['Tekrar aktif', '#198754']];
+            $satirlar = '';
+            foreach ($bildirimler as $b) {
+                [$etiket, $renk] = $basliklar[$b['tur']];
+                $satirlar .= '<tr><td style="padding:6px 10px;border:1px solid #ddd"><b style="color:' . $renk . '">' . $etiket . '</b></td>'
+                    . '<td style="padding:6px 10px;border:1px solid #ddd">' . htmlspecialchars($b['varlik']) . '</td>'
+                    . '<td style="padding:6px 10px;border:1px solid #ddd">' . htmlspecialchars($b['detay']) . '</td></tr>';
+            }
+            $link = rtrim((string)siteAyar('site_url', ''), '/');
+            $link = $link ? (preg_match('#^https?://#', $link) ? $link : 'https://' . $link) . '/admin/pages/meta-kisitlama-takibi.php' : '';
+            $html = '<p>Meta varlıklarında aşağıdaki değişiklikler tespit edildi (' . date('d.m.Y H:i') . '):</p>'
+                . '<table style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:13px">'
+                . '<tr style="background:#f5f5f5"><th style="padding:6px 10px;border:1px solid #ddd">Olay</th><th style="padding:6px 10px;border:1px solid #ddd">Varlık</th><th style="padding:6px 10px;border:1px solid #ddd">Detay</th></tr>'
+                . $satirlar . '</table>'
+                . ($link ? '<p><a href="' . htmlspecialchars($link) . '">Meta Kısıtlama Takibi sayfasını aç</a></p>' : '');
+            $acilan = count(array_filter($bildirimler, fn($b) => $b['tur'] === 'acildi'));
+            $konu = 'Meta Kısıtlama: ' . count($bildirimler) . ' değişiklik' . ($acilan ? " ($acilan yeni kısıtlama)" : '');
+
+            if ($isDry) {
+                $L("Mail atlandı (dry). Konu: $konu → " . ($alicilar ? implode(', ', $alicilar) : 'ALICI YOK'));
+                echo strip_tags(str_replace('</tr>', "\n", $html)) . PHP_EOL;
+                $sonuc = 'DRY RUN: ' . count($bildirimler) . ' değişiklik, kayıt ve mail yapılmadı.';
+            } elseif (!$alicilar) {
+                $sonuc = count($bildirimler) . ' değişiklik işlendi ancak alıcı tanımlı değil (alicilar / site admin_email), mail gönderilmedi.';
+                $durum = 2;
+            } else {
+                $m = EntegrasyonHelper::emailGonder($mailKanal, array_map(fn($a) => [$a, ''], $alicilar), $konu, $html, true);
+                $sonuc = count($bildirimler) . ' değişiklik işlendi. Mail: ' . (!empty($m['success']) ? 'gönderildi (' . implode(', ', $alicilar) . ')' : 'HATA - ' . ($m['message'] ?? '?'));
+                if (empty($m['success'])) $durum = 2;
+            }
+        }
+        $L($sonuc);
+    } catch (Throwable $e) {
+        $sonuc = get_class($e) . ': ' . $e->getMessage();
+        $durum = 2;
+    }
+
+    return ['durum' => $durum, 'sonuc' => $sonuc, 'cikti' => ob_get_clean()];
+}
+
 function gorevCalistir(string $gorevKodu, array $params, $db): array
 {
     return match($gorevKodu) {
@@ -4401,6 +4639,7 @@ function gorevCalistir(string $gorevKodu, array $params, $db): array
         'banka_hareket_sync'        => gorevBankaHareketSync($params, $db),
         'fikstur_kazi'              => gorevFiksturKazi($params, $db),
         'kurulum_bayi_randevu_bildir' => gorevKurulumBayiRandevuBildir($params, $db),
+        'meta_kisitlama_izle'       => gorevMetaKisitlamaIzle($params, $db),
         default                     => throw new RuntimeException("Bilinmeyen görev kodu: {$gorevKodu}"),
     };
 }
