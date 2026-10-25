@@ -82,12 +82,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if ($search !== '') {
                     $where[] = "(o.MetaKisitlamaOlaylari_MetaSikayetNo LIKE ? OR o.MetaKisitlamaOlaylari_ReklamKodlari LIKE ?
                                  OR o.MetaKisitlamaOlaylari_HakSahibi LIKE ? OR o.MetaKisitlamaOlaylari_VarlikAdi LIKE ?
-                                 OR o.MetaKisitlamaOlaylari_Aciklama LIKE ?
+                                 OR o.MetaKisitlamaOlaylari_Aciklama LIKE ? OR o.MetaKisitlamaOlaylari_DestekCaseNo LIKE ?
                                  OR EXISTS (SELECT 1 FROM ReklamHesaplari xh WHERE xh.ReklamHesaplari_id = o.MetaKisitlamaOlaylari_ReklamHesap_id
                                             AND (xh.ReklamHesaplari_HesapAdi LIKE ? OR xh.ReklamHesaplari_HesapID LIKE ?))
                                  OR EXISTS (SELECT 1 FROM ReklamFacebookSayfalari xs WHERE xs.ReklamFacebookSayfalari_id = o.MetaKisitlamaOlaylari_FacebookSayfa_id
                                             AND (xs.ReklamFacebookSayfalari_SayfaAdi LIKE ? OR xs.ReklamFacebookSayfalari_SayfaID LIKE ?)))";
-                    array_push($params, ...array_fill(0, 9, "%$search%"));
+                    array_push($params, ...array_fill(0, 10, "%$search%"));
                 }
                 foreach ([
                     'f_varlik_turu' => 'o.MetaKisitlamaOlaylari_VarlikTuru_id',
@@ -234,6 +234,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'MetaKisitlamaOlaylari_OlayDurumu_id'        => (int)($_POST['olay_durumu'] ?? 0),
                     'MetaKisitlamaOlaylari_OlayTarihi'           => str_replace('T', ' ', $_POST['olay_tarihi'] ?? ''),
                     'MetaKisitlamaOlaylari_MetaSikayetNo'        => mkDeger($_POST['sikayet_no'] ?? ''),
+                    'MetaKisitlamaOlaylari_DestekCaseNo'         => mkDeger($_POST['destek_case_no'] ?? ''),
                     'MetaKisitlamaOlaylari_ReklamKodlari'        => mkDeger($_POST['reklam_kodlari'] ?? ''),
                     'MetaKisitlamaOlaylari_HakSahibi'            => mkDeger($_POST['hak_sahibi'] ?? ''),
                     'MetaKisitlamaOlaylari_HakSahibiEposta'      => mkDeger($_POST['hak_sahibi_eposta'] ?? ''),
@@ -312,6 +313,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         o.MetaKisitlamaOlaylari_OlayDurumu_id AS DurumId,
                         CONVERT(VARCHAR(16), o.MetaKisitlamaOlaylari_OlayTarihi, 120) AS OlayTarihi,
                         o.MetaKisitlamaOlaylari_MetaSikayetNo AS SikayetNo, o.MetaKisitlamaOlaylari_ReklamKodlari AS ReklamKodlari,
+                        o.MetaKisitlamaOlaylari_DestekCaseNo AS DestekCaseNo,
                         o.MetaKisitlamaOlaylari_HakSahibi AS HakSahibi, o.MetaKisitlamaOlaylari_HakSahibiEposta AS HakSahibiEposta,
                         o.MetaKisitlamaOlaylari_IddiaEdilenHak AS IddiaEdilenHak, o.MetaKisitlamaOlaylari_MetaKodu AS MetaKodu,
                         o.MetaKisitlamaOlaylari_Aciklama AS Aciklama, o.MetaKisitlamaOlaylari_Otomatik AS Otomatik,
@@ -660,7 +662,7 @@ function mkSecenekler(array $liste, bool $ext = false): string
                                     <div class="row g-3">
                                         <div class="col-md-4">
                                             <label class="form-label">Ara</label>
-                                            <input type="text" class="form-control" id="filter_search" placeholder="Varlık, şikayet no, reklam kodu, hak sahibi...">
+                                            <input type="text" class="form-control" id="filter_search" placeholder="Varlık, şikayet/case no, reklam kodu, hak sahibi...">
                                         </div>
                                         <div class="col-md-2">
                                             <label class="form-label">Varlık Türü</label>
@@ -830,7 +832,11 @@ function mkSecenekler(array $liste, bool $ext = false): string
                             <label class="form-label">Meta Şikayet No</label>
                             <input type="text" class="form-control" name="sikayet_no" id="sikayet_no">
                         </div>
-                        <div class="col-md-8">
+                        <div class="col-md-4">
+                            <label class="form-label">Meta Destek Case No</label>
+                            <input type="text" class="form-control" name="destek_case_no" id="destek_case_no" placeholder="Virgülle ayırın">
+                        </div>
+                        <div class="col-md-4">
                             <label class="form-label">Şikayet Edilen Reklam Kodları</label>
                             <input type="text" class="form-control" name="reklam_kodlari" id="reklam_kodlari" placeholder="Virgülle ayırın">
                         </div>
@@ -879,7 +885,10 @@ function mkSecenekler(array $liste, bool $ext = false): string
         <div class="modal-content">
             <div class="modal-header">
                 <h5 class="modal-title" id="detayModalLabel">Olay Detayı</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                <?php if ($permissions['can_edit']): ?>
+                <button type="button" class="btn btn-warning btn-sm ms-auto me-2" onclick="detaydanDuzenle()"><i class="bi bi-pencil"></i> Düzenle</button>
+                <?php endif; ?>
+                <button type="button" class="btn-close<?= $permissions['can_edit'] ? ' ms-0' : '' ?>" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body">
                 <div class="row g-4">
@@ -1029,7 +1038,7 @@ function mkSecenekler(array $liste, bool $ext = false): string
         canDelete: <?= $permissions['can_delete'] ? 'true' : 'false' ?>
     };
 
-    let olayModal, detayModal, belgeModal, kontrolModal, olayTable, belgeTable, kontrolTable, aktifOlayId = 0;
+    let olayModal, detayModal, belgeModal, kontrolModal, olayTable, belgeTable, kontrolTable, aktifOlayId = 0, detayDonus = 0;
 
     $(document).ready(function () {
         olayModal    = new bootstrap.Modal(document.getElementById('olayModal'));
@@ -1120,7 +1129,18 @@ function mkSecenekler(array $liste, bool $ext = false): string
         });
 
         $('#varlik_turu').on('change', varlikAlanGuncelle);
-        $('#olayForm').on('submit', function (e) { e.preventDefault(); formGonder(this, 'olay_kaydet', () => { olayModal.hide(); olayTable.ajax.reload(null, false); }); });
+        $('#olayForm').on('submit', function (e) {
+            e.preventDefault();
+            formGonder(this, 'olay_kaydet', () => {
+                const donus = detayDonus;
+                detayDonus = 0;
+                olayModal.hide();
+                olayTable.ajax.reload(null, false);
+                if (donus) document.getElementById('olayModal').addEventListener('hidden.bs.modal', () => detayAc(donus), { once: true });
+            });
+        });
+        // Detaydan açılan düzenleme iptal edilirse dönüş bayrağını temizle
+        document.getElementById('olayModal').addEventListener('hidden.bs.modal', () => { if (detayDonus) detayDonus = 0; });
         $('#hareketForm').on('submit', function (e) {
             e.preventDefault();
             formGonder(this, 'hareket_ekle', () => { detayAc(aktifOlayId); olayTable.ajax.reload(null, false); });
@@ -1206,6 +1226,7 @@ function mkSecenekler(array $liste, bool $ext = false): string
             $('#olay_tarihi').val(d.OlayTarihiInput || '');
             $('#sikayet_no').val(d.MetaKisitlamaOlaylari_MetaSikayetNo || '');
             $('#reklam_kodlari').val(d.MetaKisitlamaOlaylari_ReklamKodlari || '');
+            $('#destek_case_no').val(d.MetaKisitlamaOlaylari_DestekCaseNo || '');
             $('#hak_sahibi').val(d.MetaKisitlamaOlaylari_HakSahibi || '');
             $('#hak_sahibi_eposta').val(d.MetaKisitlamaOlaylari_HakSahibiEposta || '');
             $('#iddia_edilen_hak').val(d.MetaKisitlamaOlaylari_IddiaEdilenHak || '');
@@ -1234,6 +1255,7 @@ function mkSecenekler(array $liste, bool $ext = false): string
                 satir('Durum', `<span class="badge text-bg-${escapeHtml(d.DurumRenk || 'secondary')}">${escapeHtml(d.DurumAdi)}</span>${d.Otomatik == 1 ? ' <span class="badge text-bg-info">Otomatik</span>' : ''}`) +
                 satir('Olay Tarihi', escapeHtml(d.OlayTarihi)) +
                 satir('Şikayet No', escapeHtml(d.SikayetNo)) +
+                satir('Destek Case No', escapeHtml(d.DestekCaseNo)) +
                 satir('Reklam Kodları', escapeHtml(d.ReklamKodlari)) +
                 satir('Hak Sahibi', escapeHtml(d.HakSahibi)) +
                 satir('Hak Sahibi E-posta', d.HakSahibiEposta ? `<a href="mailto:${escapeHtml(d.HakSahibiEposta)}">${escapeHtml(d.HakSahibiEposta)}</a>` : '') +
@@ -1269,6 +1291,14 @@ function mkSecenekler(array $liste, bool $ext = false): string
             }
             detayModal.show();
         }, 'json');
+    }
+
+    // Detaydan düzenlemeye geç; kayıttan sonra detayı yeniden aç
+    function detaydanDuzenle() {
+        const id = aktifOlayId;
+        document.getElementById('detayModal').addEventListener('hidden.bs.modal', () => olayDuzenle(id), { once: true });
+        detayModal.hide();
+        detayDonus = id;
     }
 
     function hareketSil(id) {
