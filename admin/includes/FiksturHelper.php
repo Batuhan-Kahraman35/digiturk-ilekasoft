@@ -203,6 +203,8 @@ class FiksturHelper
         // Tarih + ek bilgi
         $tarih = null; $ek = '';
         if (preg_match('/^(\d{2})\.(\d{2})\.(\d{4})\s*(.*)$/u', trim($tarihMetin), $t)) {
+            // Kaynak bazen "00.00.0000" + script parçası içeren bozuk satır basıyor; DATETIME'a sığmaz
+            if (!checkdate((int)$t[2], (int)$t[1], (int)$t[3])) return null;
             $tarih = sprintf('%04d-%02d-%02d', $t[3], $t[2], $t[1]);
             $ek    = trim($t[4]);
         }
