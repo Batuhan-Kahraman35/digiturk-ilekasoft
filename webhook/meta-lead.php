@@ -95,6 +95,7 @@ function graphGet(string $url): array
 }
 
 require_once __DIR__ . '/../admin/includes/MetaLeadAlan.php';
+require_once __DIR__ . '/../admin/includes/LeadFormKural.php';
 
 // ─── Akış ──────────────────────────────────────────────────────────────────────
 $db    = Database::getInstance();
@@ -205,12 +206,39 @@ foreach (($payload['entry'] ?? []) as $entry) {
 
         // Form FK eşleşmesi
         $formFk = null;
+        $f      = null;
         if ($gercekFormId !== '') {
             $f = $db->fetchOne(
-                "SELECT ReklamLeadFormlari_id FROM ReklamLeadFormlari WHERE ReklamLeadFormlari_FormID = ?",
+                "SELECT ReklamLeadFormlari_id, ReklamLeadFormlari_FormAdi, Durum FROM ReklamLeadFormlari WHERE ReklamLeadFormlari_FormID = ?",
                 [$gercekFormId]
             );
             $formFk = $f['ReklamLeadFormlari_id'] ?? null;
+        }
+
+        // Pasif form → lead alınmaz
+        if ($f && (int)$f['Durum'] === 0) {
+            whLog("PASIF FORM atlandi lead=$leadgenId form=$gercekFormId");
+            continue;
+        }
+
+        // Lead alım kuralları (form adına göre). Form henüz DB'de yoksa adı Graph'tan alınır;
+        // ad hiç öğrenilemezse lead kaybolmasın diye alınır.
+        $kurallar = LeadFormKural::kurallar($db);
+        if ($kurallar && $gercekFormId !== '') {
+            $formAdi = (string)($f['ReklamLeadFormlari_FormAdi'] ?? '');
+            if ($formAdi === '') {
+                $rn = graphGet(rtrim((string)$kaynak['BaseURL'], '/') . '/' . $gercekFormId . '?' . http_build_query([
+                    'fields'          => 'name',
+                    'access_token'    => $pageToken,
+                    'appsecret_proof' => appProof($pageToken, (string)$kaynak['AppSecret']),
+                ]));
+                $formAdi = (string)($rn['data']['name'] ?? '');
+            }
+            $engel = $formAdi !== '' ? LeadFormKural::engelNedeni($formAdi, $kurallar) : null;
+            if ($engel) {
+                whLog("KURAL atlandi lead=$leadgenId form=$gercekFormId ($formAdi) neden=" . $engel['neden']);
+                continue;
+            }
         }
 
         // Form için hiç alan satırı yoksa (yeni form) soruları çekip varsayılan eşlemeyi kur:

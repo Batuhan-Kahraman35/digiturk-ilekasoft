@@ -7,6 +7,7 @@
 require_once __DIR__ . '/../auth.php';
 require_once __DIR__ . '/../includes/PageAuth.php';
 require_once __DIR__ . '/../includes/MetaReklamSync.php';
+require_once __DIR__ . '/../includes/LeadFormKural.php';
 
 requireAuth();
 
@@ -575,7 +576,99 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     WHERE " . implode(' AND ', $where) . "
                     ORDER BY f.ReklamLeadFormlari_FormAdi
                 ", $params);
+                // Alım kuralına takılan Meta formları işaretlenir (web formları webhook'tan gelmez)
+                $kurallar = LeadFormKural::kurallar($db);
+                foreach ($liste as &$satir) {
+                    $satir['kural_engel'] = ($kurallar && ctype_digit((string)$satir['ReklamLeadFormlari_FormID']))
+                        ? (LeadFormKural::engelNedeni((string)$satir['ReklamLeadFormlari_FormAdi'], $kurallar)['neden'] ?? null)
+                        : null;
+                }
+                unset($satir);
                 echo json_encode(['success' => true, 'data' => $liste]);
+                break;
+
+            // ── Lead alım kuralları (form adına göre) ───────────────────────
+            case 'formkural_listele':
+                $kurallar = $db->fetchAll("
+                    SELECT ReklamLeadFormKurallari_id AS id, ReklamLeadFormKurallari_Tip AS tip,
+                           ReklamLeadFormKurallari_Eslesme AS eslesme, ReklamLeadFormKurallari_Deger AS deger,
+                           ReklamLeadFormKurallari_Aciklama AS aciklama, Durum
+                    FROM ReklamLeadFormKurallari
+                    ORDER BY ReklamLeadFormKurallari_Tip, ReklamLeadFormKurallari_Deger
+                ");
+                // Önizleme: aktif kurallara göre lead'i alınmayacak Meta formları
+                $aktifKurallar = LeadFormKural::kurallar($db);
+                $engellenen = [];
+                if ($aktifKurallar) {
+                    $formlar = $db->fetchAll("
+                        SELECT ReklamLeadFormlari_id, ReklamLeadFormlari_FormAdi, ReklamLeadFormlari_FormDurumu
+                        FROM ReklamLeadFormlari
+                        WHERE Durum = 1 AND ReklamLeadFormlari_FormID LIKE '[0-9]%'
+                        ORDER BY ReklamLeadFormlari_FormAdi
+                    ");
+                    foreach ($formlar as $fr) {
+                        $e = LeadFormKural::engelNedeni((string)$fr['ReklamLeadFormlari_FormAdi'], $aktifKurallar);
+                        if ($e) $engellenen[] = [
+                            'id'     => (int)$fr['ReklamLeadFormlari_id'],
+                            'ad'     => $fr['ReklamLeadFormlari_FormAdi'],
+                            'durum'  => $fr['ReklamLeadFormlari_FormDurumu'],
+                            'neden'  => $e['neden'],
+                        ];
+                    }
+                }
+                echo json_encode(['success' => true, 'data' => $kurallar, 'engellenen' => $engellenen]);
+                break;
+
+            case 'formkural_kaydet':
+                $kid     = (int)($_POST['id'] ?? 0);
+                if ($kid > 0 && !$permissions['can_edit']) { echo json_encode(['success' => false, 'message' => 'Düzenleme yetkiniz yok.']); break; }
+                if ($kid == 0 && !$permissions['can_add'])  { echo json_encode(['success' => false, 'message' => 'Ekleme yetkiniz yok.']); break; }
+                $tip     = (string)($_POST['tip'] ?? '');
+                $eslesme = (string)($_POST['eslesme'] ?? '');
+                $deger   = trim((string)($_POST['deger'] ?? ''));
+                if (!isset(LeadFormKural::TIPLER[$tip]) || !isset(LeadFormKural::ESLESMELER[$eslesme])) {
+                    echo json_encode(['success' => false, 'message' => 'Geçersiz kural tipi veya eşleşme türü.']); break;
+                }
+                if ($deger === '' || LeadFormKural::normalize($deger) === '') {
+                    echo json_encode(['success' => false, 'message' => 'Aranacak metni girin.']); break;
+                }
+                $veri = [
+                    'ReklamLeadFormKurallari_Tip'      => $tip,
+                    'ReklamLeadFormKurallari_Eslesme'  => $eslesme,
+                    'ReklamLeadFormKurallari_Deger'    => mb_substr($deger, 0, 200),
+                    'ReklamLeadFormKurallari_Aciklama' => trim((string)($_POST['aciklama'] ?? '')) ?: null,
+                    'GuncelleyenKullanici'             => $user['kullanici_id'],
+                    'GuncellemeTarihi'                 => date('Y-m-d H:i:s'),
+                ];
+                if ($kid > 0) {
+                    $db->update('ReklamLeadFormKurallari', $veri, ['ReklamLeadFormKurallari_id' => $kid]);
+                    $mesaj = 'Kural güncellendi.';
+                } else {
+                    $veri['OlusturanKullanici'] = $user['kullanici_id'];
+                    $veri['OlusturmaTarihi']    = date('Y-m-d H:i:s');
+                    $veri['Durum']              = 1;
+                    $db->insert('ReklamLeadFormKurallari', $veri);
+                    $mesaj = 'Kural eklendi.';
+                }
+                echo json_encode(['success' => true, 'message' => $mesaj]);
+                break;
+
+            case 'formkural_durum':
+                if (!$permissions['can_edit']) { echo json_encode(['success' => false, 'message' => 'Düzenleme yetkiniz yok.']); break; }
+                $kid  = (int)($_POST['id'] ?? 0);
+                $yeni = (int)($_POST['durum'] ?? 0) === 1 ? 1 : 0;
+                $db->update('ReklamLeadFormKurallari', [
+                    'Durum'                => $yeni,
+                    'GuncelleyenKullanici' => $user['kullanici_id'],
+                    'GuncellemeTarihi'     => date('Y-m-d H:i:s'),
+                ], ['ReklamLeadFormKurallari_id' => $kid]);
+                echo json_encode(['success' => true, 'message' => $yeni ? 'Kural aktif edildi.' : 'Kural pasife alındı.']);
+                break;
+
+            case 'formkural_sil':
+                if (!$permissions['can_delete']) { echo json_encode(['success' => false, 'message' => 'Silme yetkiniz yok.']); break; }
+                $db->delete('ReklamLeadFormKurallari', ['ReklamLeadFormKurallari_id' => (int)($_POST['id'] ?? 0)]);
+                echo json_encode(['success' => true, 'message' => 'Kural silindi.']);
                 break;
 
             // ── Tek kampanyanın Meta bağlantısını canlı kontrol et ──────────
@@ -1842,7 +1935,7 @@ $canDel  = $permissions['can_delete'] ? 'true' : 'false';
                         </div>
                         <div class="card">
                             <div class="card-header"><h3 class="card-title">Lead Formları</h3>
-                                <div class="card-tools"><button class="btn btn-success btn-sm me-1" onclick="excelIndir('form')"><i class="bi bi-file-earmark-excel"></i> Excel</button><?php if ($permissions['can_add']): ?><button class="btn btn-primary btn-sm" onclick="modalAc('form')"><i class="bi bi-plus-circle"></i> Yeni Form</button><?php endif; ?></div>
+                                <div class="card-tools"><button class="btn btn-secondary btn-sm me-1" onclick="formKuralAc()" title="Lead alım kuralları"><i class="bi bi-gear"></i> Ayarlar</button><button class="btn btn-success btn-sm me-1" onclick="excelIndir('form')"><i class="bi bi-file-earmark-excel"></i> Excel</button><?php if ($permissions['can_add']): ?><button class="btn btn-primary btn-sm" onclick="modalAc('form')"><i class="bi bi-plus-circle"></i> Yeni Form</button><?php endif; ?></div>
                             </div>
                             <div class="card-body">
                                 <table id="tblForm" class="table table-bordered table-striped table-hover">
@@ -2000,6 +2093,59 @@ $canDel  = $permissions['can_delete'] ? 'true' : 'false';
     </div>
     <div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">İptal</button><button type="submit" class="btn btn-primary"><i class="bi bi-save"></i> Kaydet</button></div>
 </form></div></div></div>
+
+<!-- MODAL: Lead Alım Kuralları -->
+<div class="modal fade" id="modalFormKural" tabindex="-1"><div class="modal-dialog modal-xl modal-dialog-scrollable"><div class="modal-content">
+    <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-gear"></i> Lead Alım Kuralları</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+    </div>
+    <div class="modal-body">
+        <div class="alert alert-light border py-2 px-3 small">
+            <i class="bi bi-info-circle text-primary me-1"></i>
+            Kurallar Meta'dan gelen lead'lere, <strong>form adına</strong> göre uygulanır.
+            <strong>Hariç tut</strong> kuralına uyan formun lead'i alınmaz (her zaman önceliklidir).
+            En az bir aktif <strong>Sadece bunları al</strong> kuralı varsa yalnız bu kurallardan birine uyan formların lead'i alınır.
+            Büyük/küçük harf, boşluk, <code>-</code> ve <code>_</code> farkı yok sayılır. Pasif formların lead'i de alınmaz.
+        </div>
+        <?php if ($permissions['can_add']): ?>
+        <form id="formFormKural" class="row g-2 align-items-end mb-3">
+            <input type="hidden" name="id">
+            <div class="col-md-3"><label class="form-label small mb-1">Kural</label>
+                <select class="form-select" name="tip" id="fkTip">
+                    <?php foreach (LeadFormKural::TIPLER as $k => $v): ?><option value="<?= $k ?>"><?= htmlspecialchars($v) ?></option><?php endforeach; ?>
+                </select></div>
+            <div class="col-md-2"><label class="form-label small mb-1">Eşleşme</label>
+                <select class="form-select" name="eslesme" id="fkEslesme">
+                    <?php foreach (LeadFormKural::ESLESMELER as $k => $v): ?><option value="<?= $k ?>"><?= htmlspecialchars($v) ?></option><?php endforeach; ?>
+                </select></div>
+            <div class="col-md-3"><label class="form-label small mb-1">Form adında aranacak metin <span class="text-danger">*</span></label>
+                <input type="text" class="form-control" name="deger" maxlength="200" placeholder="Örn: DigiturkMerkez" required></div>
+            <div class="col-md-2"><label class="form-label small mb-1">Açıklama</label>
+                <input type="text" class="form-control" name="aciklama" maxlength="500"></div>
+            <div class="col-md-2 d-flex gap-1">
+                <button type="submit" class="btn btn-primary flex-fill" id="fkKaydetBtn"><i class="bi bi-plus-circle"></i> Ekle</button>
+                <button type="button" class="btn btn-outline-secondary d-none" id="fkVazgecBtn" onclick="formKuralFormSifirla()" title="Vazgeç"><i class="bi bi-x-lg"></i></button>
+            </div>
+        </form>
+        <?php endif; ?>
+        <div class="table-responsive">
+            <table class="table table-sm table-bordered align-middle mb-3">
+                <thead class="table-light"><tr><th>Kural</th><th>Eşleşme</th><th>Metin</th><th>Açıklama</th><th style="width:70px">Durum</th><th style="width:90px">İşlem</th></tr></thead>
+                <tbody id="fkSatirlar"></tbody>
+            </table>
+        </div>
+        <div class="fw-semibold mb-1"><i class="bi bi-slash-circle text-danger me-1"></i> Lead'i alınmayacak formlar <span class="badge text-bg-danger" id="fkEngelSayi">0</span></div>
+        <div class="form-text mb-2">Aktif kurallara göre, şu an listede bulunan Meta formlarından etkilenenler.</div>
+        <div class="table-responsive" style="max-height:260px">
+            <table class="table table-sm table-striped mb-0">
+                <thead class="table-light"><tr><th>ID</th><th>Form Adı</th><th>Meta Durumu</th><th>Neden</th></tr></thead>
+                <tbody id="fkEngelSatirlar"></tbody>
+            </table>
+        </div>
+    </div>
+    <div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Kapat</button></div>
+</div></div></div>
 
 <!-- MODAL: Bağlantı Testi -->
 <div class="modal fade" id="modalBaglantiTesti" tabindex="-1"><div class="modal-dialog modal-xl modal-dialog-scrollable"><div class="modal-content">
@@ -2474,7 +2620,7 @@ function satirHtml(ent, x) {
     if (ent === 'form') {
         return `<tr>
             <td>${x.ReklamLeadFormlari_id}</td>
-            <td>${enc(x.ReklamLeadFormlari_FormAdi)}</td>
+            <td>${enc(x.ReklamLeadFormlari_FormAdi)}${x.kural_engel ? ` <span class="badge text-bg-danger" title="${enc(x.kural_engel)}"><i class="bi bi-slash-circle"></i> Lead alınmıyor</span>` : ''}</td>
             <td>${enc(x.ReklamFacebookSayfalari_SayfaAdi)}</td>
             <td><small>${enc(x.ReklamLeadFormlari_FormID)}</small></td>
             <td id="md-form-${x.ReklamLeadFormlari_id}">${metinDurumBadge(x.ReklamLeadFormlari_FormDurumu)}</td>
@@ -2691,6 +2837,103 @@ function sil(ent, id, ad) {
         });
     });
 }
+
+// ── Lead Alım Kuralları ─────────────────────────────────────────────────────
+const FK_TIPLER     = <?= json_encode(LeadFormKural::TIPLER, JSON_UNESCAPED_UNICODE) ?>;
+const FK_ESLESMELER = <?= json_encode(LeadFormKural::ESLESMELER, JSON_UNESCAPED_UNICODE) ?>;
+let fkKurallar = [], fkDegisti = false;
+
+function formKuralAc() {
+    ['#fkTip', '#fkEslesme'].forEach(function (s) {
+        if (!$(s).length) return;
+        if ($(s).hasClass('select2-hidden-accessible')) $(s).select2('destroy');
+        $(s).select2({ theme: 'bootstrap-5', width: '100%', dropdownParent: $('#modalFormKural') });
+    });
+    formKuralFormSifirla();
+    fkDegisti = false;
+    formKuralYukle();
+    bootstrap.Modal.getOrCreateInstance('#modalFormKural').show();
+}
+
+function formKuralYukle() {
+    $.post(pageUrl, { action: 'formkural_listele' }, function (r) {
+        if (!r.success) { Swal.fire('Hata', r.message, 'error'); return; }
+        fkKurallar = r.data || [];
+        $('#fkSatirlar').html(fkKurallar.length ? fkKurallar.map(function (k) {
+            const tipRozet = k.tip === 'ALMA'
+                ? '<span class="badge text-bg-danger">' + enc(FK_TIPLER[k.tip]) + '</span>'
+                : '<span class="badge text-bg-success">' + enc(FK_TIPLER[k.tip]) + '</span>';
+            return `<tr>
+                <td>${tipRozet}</td>
+                <td>${enc(FK_ESLESMELER[k.eslesme] || k.eslesme)}</td>
+                <td><code>${enc(k.deger)}</code></td>
+                <td><small>${enc(k.aciklama)}</small></td>
+                <td>${durumSwitch('formkural', k.id, k.Durum)}</td>
+                <td>${CAN.edit ? `<button class="btn btn-sm btn-warning me-1" title="Düzenle" onclick="formKuralDuzenle(${k.id})"><i class="bi bi-pencil"></i></button>` : ''}${CAN.del ? `<button class="btn btn-sm btn-danger" title="Sil" onclick="formKuralSil(${k.id})"><i class="bi bi-trash"></i></button>` : ''}</td>
+            </tr>`;
+        }).join('') : '<tr><td colspan="6" class="text-center text-muted">Kural yok — tüm formların lead\'i alınır.</td></tr>');
+
+        const eng = r.engellenen || [];
+        $('#fkEngelSayi').text(eng.length);
+        $('#fkEngelSatirlar').html(eng.length ? eng.map(e => `<tr>
+            <td>${e.id}</td><td>${enc(e.ad)}</td><td>${metinDurumBadge(e.durum)}</td><td><small>${enc(e.neden)}</small></td>
+        </tr>`).join('') : '<tr><td colspan="4" class="text-center text-muted">Etkilenen form yok.</td></tr>');
+    }, 'json').fail(function () { Swal.fire('Hata', 'Kurallar yüklenemedi.', 'error'); });
+}
+
+function formKuralFormSifirla() {
+    const f = $('#formFormKural');
+    if (!f.length) return;
+    f[0].reset();
+    f.find('[name=id]').val('');
+    $('#fkTip, #fkEslesme').trigger('change');
+    $('#fkKaydetBtn').html('<i class="bi bi-plus-circle"></i> Ekle');
+    $('#fkVazgecBtn').addClass('d-none');
+}
+
+function formKuralDuzenle(id) {
+    const k = fkKurallar.find(x => x.id == id);
+    if (!k) return;
+    const f = $('#formFormKural');
+    f.find('[name=id]').val(k.id);
+    $('#fkTip').val(k.tip).trigger('change');
+    $('#fkEslesme').val(k.eslesme).trigger('change');
+    f.find('[name=deger]').val(k.deger);
+    f.find('[name=aciklama]').val(k.aciklama || '');
+    $('#fkKaydetBtn').html('<i class="bi bi-save"></i> Kaydet');
+    $('#fkVazgecBtn').removeClass('d-none');
+}
+
+$(document).on('submit', '#formFormKural', function (e) {
+    e.preventDefault();
+    const data = $(this).serializeArray().reduce((o, x) => (o[x.name] = x.value, o), { action: 'formkural_kaydet' });
+    $.post(pageUrl, data, function (r) {
+        if (!r.success) { Swal.fire('Hata', r.message, 'error'); return; }
+        fkDegisti = true;
+        Swal.fire({ toast: true, position: 'top-end', icon: 'success', title: r.message, timer: 1400, showConfirmButton: false });
+        formKuralFormSifirla();
+        formKuralYukle();
+    }, 'json').fail(function () { Swal.fire('Hata', 'Sunucu hatası.', 'error'); });
+});
+
+function formKuralSil(id) {
+    Swal.fire({ title: 'Kural silinsin mi?', icon: 'warning', showCancelButton: true, confirmButtonText: 'Sil', cancelButtonText: 'Vazgeç', confirmButtonColor: '#dc3545' })
+        .then(function (s) {
+            if (!s.isConfirmed) return;
+            $.post(pageUrl, { action: 'formkural_sil', id: id }, function (r) {
+                if (!r.success) { Swal.fire('Hata', r.message, 'error'); return; }
+                fkDegisti = true;
+                formKuralYukle();
+            }, 'json');
+        });
+}
+
+// Kural durum anahtarı genel durumDegistir()'i kullanır; değişince önizlemeyi tazele
+$(document).on('change', '#fkSatirlar .form-check-input', function () {
+    fkDegisti = true;
+    setTimeout(formKuralYukle, 600);
+});
+$('#modalFormKural').on('hidden.bs.modal', function () { if (fkDegisti) listele('form'); });
 
 // ── Lead Formu Alan Eşleme ──────────────────────────────────────────────────
 let AE_HEDEFLER = [];
