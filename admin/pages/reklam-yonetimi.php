@@ -1235,6 +1235,42 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 echo json_encode(['success' => true, 'geri' => $geri, 'limit' => $limit]);
                 break;
 
+            // ── Eksik lead çekme ────────────────────────────────────────────
+            // Sayfa sonradan eklendiğinde veya webhook kaçırdığında Meta'daki lead'ler
+            // (son ~90 gün) sayfa sayfa çekilir; Basvurular'da olmayanlar eklenir.
+            case 'form_eksik_lead_cek':
+                if (!$permissions['can_edit']) { echo json_encode(['success' => false, 'message' => 'Düzenleme yetkiniz yok.']); break; }
+
+                $fid   = (int)($_POST['id'] ?? 0);
+                $after = trim((string)($_POST['after'] ?? ''));
+                $form  = $fid > 0 ? $db->fetchOne("SELECT ReklamLeadFormlari_Sayfa_id, ReklamLeadFormlari_FormID FROM ReklamLeadFormlari WHERE ReklamLeadFormlari_id = ?", [$fid]) : null;
+                if (!$form) { echo json_encode(['success' => false, 'message' => 'Form bulunamadı.']); break; }
+                if (!ctype_digit((string)$form['ReklamLeadFormlari_FormID'])) {
+                    echo json_encode(['success' => false, 'message' => 'Bu form Meta formu değil.']); break;
+                }
+                if ($birimKisitli && !empty($form['ReklamLeadFormlari_Sayfa_id'])
+                    && !sayfaKayitBirimYetkiliMi($db, $izinliBirimler, (int)$form['ReklamLeadFormlari_Sayfa_id'])) {
+                    echo json_encode(['success' => false, 'message' => 'Bu formun sayfası için yetkiniz yok.']); break;
+                }
+
+                // Başlangıç tarihi zorunlu: en fazla 90 gün geriye (Meta'nın tuttuğu süre)
+                $bas = DateTime::createFromFormat('!Y-m-d', (string)($_POST['baslangic'] ?? ''));
+                $enEski = (new DateTime('today'))->modify('-90 days');
+                if (!$bas || $bas > new DateTime('today')) { echo json_encode(['success' => false, 'message' => 'Geçerli bir başlangıç tarihi seçin.']); break; }
+                if ($bas < $enEski) $bas = $enEski;
+
+                if (session_status() === PHP_SESSION_ACTIVE) session_write_close();
+                require_once __DIR__ . '/../includes/MetaLeadIsle.php';
+
+                $sonuc = MetaLeadIsle::formLeadleriniCek($db, $fid, $after !== '' ? $after : null, 50, $bas->getTimestamp() - 1, ['nokta' => 'reklam-yonetimi:eksik-lead']);
+                echo json_encode([
+                    'success' => $sonuc['ok'],
+                    'message' => $sonuc['hata'],
+                    'sayac'   => $sonuc['sayac'],
+                    'sonraki' => $sonuc['sonraki'],
+                ]);
+                break;
+
             // ── Birim yetkileri (junction) ──────────────────────────────────
             case 'get_birimler':
                 echo json_encode(['success' => true, 'data' => $db->fetchAll(
@@ -2629,7 +2665,7 @@ function satirHtml(ent, x) {
             <td data-order="${parseInt(x.satis_adedi||0,10)}">${satisAdetRozet(x.satis_adedi)}</td>
             <td data-order="${x.son_lead ? new Date(String(x.son_lead).replace(" ","T")).getTime()||0 : 0}">${sonLeadMetni(x.son_lead)}</td>
             <td>${durumSwitch('form', x.ReklamLeadFormlari_id, x.Durum)}</td>
-            <td>${metaKontrolBtn('form', x)}${CAN.edit ? `<button class="btn btn-sm btn-info me-1" title="Alan Eşle" onclick="alanEslemeAc(${x.ReklamLeadFormlari_id})"><i class="bi bi-diagram-3"></i></button>` : ''}${islemBtn('form', x.ReklamLeadFormlari_id, x.ReklamLeadFormlari_FormAdi)}</td></tr>`;
+            <td>${metaKontrolBtn('form', x)}${CAN.edit ? `<button class="btn btn-sm btn-info me-1" title="Alan Eşle" onclick="alanEslemeAc(${x.ReklamLeadFormlari_id})"><i class="bi bi-diagram-3"></i></button>` : ''}${CAN.edit && /^\d+$/.test(String(x.ReklamLeadFormlari_FormID || '')) ? `<button class="btn btn-sm btn-warning me-1" title="Eksik Lead'leri Çek" data-ad="${enc(x.ReklamLeadFormlari_FormAdi).replace(/"/g, '&quot;')}" onclick="eksikLeadCek(${x.ReklamLeadFormlari_id}, this.dataset.ad)"><i class="bi bi-cloud-download"></i></button>` : ''}${islemBtn('form', x.ReklamLeadFormlari_id, x.ReklamLeadFormlari_FormAdi)}</td></tr>`;
     }
     return '';
 }
@@ -3138,6 +3174,57 @@ function aeGeriDoldur(formId, toplam, eslemeMesaj) {
         }, 'json').fail(function () { bitir(true); });
     };
     parca(0);
+}
+
+// ─── Eksik lead çekme (Meta'daki son ~90 gün; kayıtlı olanlar atlanır) ───────
+function eksikLeadCek(formId, formAdi) {
+    const ymd = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+    const bugun = new Date(), varsayilan = new Date(), enEski = new Date();
+    varsayilan.setDate(bugun.getDate() - 7);
+    enEski.setDate(bugun.getDate() - 90);
+
+    Swal.fire({
+        title: 'Eksik lead\'ler çekilsin mi?',
+        html: '<b>' + $('<div>').text(formAdi || '').html() + '</b> formunun Meta\'daki lead\'leri taranacak; sistemde olmayanlar başvuru olarak eklenecek. '
+            + 'Kayıt tarihi lead\'in Meta\'daki geliş tarihi olur.'
+            + '<div class="text-start mt-3"><label class="form-label" for="elBaslangic">Şu tarihten itibaren</label>'
+            + '<input type="date" class="form-control" id="elBaslangic" value="' + ymd(varsayilan) + '" min="' + ymd(enEski) + '" max="' + ymd(bugun) + '">'
+            + '<div class="form-text">En fazla 90 gün geriye gidilebilir (Meta daha eskisini tutmuyor).</div></div>',
+        icon: 'question', showCancelButton: true, confirmButtonText: 'Çek', cancelButtonText: 'Vazgeç',
+        preConfirm: () => {
+            const v = $('#elBaslangic').val();
+            if (!v || v < ymd(enEski) || v > ymd(bugun)) { Swal.showValidationMessage('Son 90 gün içinde bir tarih seçin.'); return false; }
+            return v;
+        }
+    }).then(function (sec) {
+        if (!sec.isConfirmed) return;
+        const baslangic = sec.value;
+
+        const ozet = { bulunan: 0, eklendi: 0, mevcut: 0, pasif: 0, kural: 0, karaliste: 0, graph: 0, hata: 0 };
+        Swal.fire({ title: 'Lead\'ler çekiliyor…', html: '<span id="elIlerleme">Meta\'ya bağlanılıyor…</span>', allowOutsideClick: false, didOpen: () => Swal.showLoading() });
+
+        const bitir = function (hataMesaji) {
+            let satirlar = ['Meta\'da bulunan: <b>' + ozet.bulunan + '</b>', 'Yeni eklenen: <b>' + ozet.eklendi + '</b>', 'Zaten kayıtlı: ' + ozet.mevcut];
+            if (ozet.pasif)     satirlar.push('Form pasif olduğu için atlanan: ' + ozet.pasif);
+            if (ozet.kural)     satirlar.push('Alım kuralına takılan: ' + ozet.kural);
+            if (ozet.karaliste) satirlar.push('Kara listede olan: ' + ozet.karaliste);
+            if (ozet.graph + ozet.hata) satirlar.push('Hata: ' + (ozet.graph + ozet.hata));
+            if (hataMesaji) satirlar.push('<span class="text-danger">' + $('<div>').text(hataMesaji).html() + '</span>');
+            Swal.fire({ icon: hataMesaji ? (ozet.bulunan ? 'warning' : 'error') : 'success', title: hataMesaji ? 'İşlem yarıda kaldı' : 'Tamamlandı', html: satirlar.join('<br>') });
+            if (ozet.eklendi) listele('form');
+        };
+
+        const parca = function (after) {
+            $.post(pageUrl, { action: 'form_eksik_lead_cek', id: formId, baslangic: baslangic, after: after || '' }, function (r) {
+                const s = r.sayac || {};
+                Object.keys(ozet).forEach(k => ozet[k] += parseInt(s[k] || 0, 10));
+                if (!r.success) { bitir(r.message || 'Meta\'dan lead alınamadı.'); return; }
+                $('#elIlerleme').text('Taranan: ' + ozet.bulunan + ' · Eklenen: ' + ozet.eklendi);
+                if (r.sonraki) parca(r.sonraki); else bitir(null);
+            }, 'json').fail(function () { bitir('Sunucu hatası.'); });
+        };
+        parca('');
+    });
 }
 </script>
 </body>

@@ -2017,6 +2017,66 @@ function gorevMetaReklamSenkronize(array $params, $db): array
     return ['durum' => $durum, 'sonuc' => $sonuc, 'cikti' => ob_get_clean()];
 }
 
+/**
+ * Webhook'un kaçırdığı lead'leri tamamlar: aktif Meta formlarının son N gündeki lead'leri
+ * Graph'tan çekilir, Basvurular'da olmayanlar MetaLeadIsle ile (kurallar + kara liste) eklenir.
+ * Kara liste engeli loglanmaz (aynı lead her turda yeniden görülür).
+ * Erişilemeyen eski formlar uyarı sayılır; yalnız hiçbir form okunamazsa görev hata verir.
+ */
+function gorevMetaEksikLead(array $params, $db): array
+{
+    ob_start();
+    set_time_limit(1800);
+
+    try {
+        require_once dirname(__DIR__) . '/admin/includes/MetaLeadIsle.php';
+
+        $gun = max(1, min(90, (int)($params['gun'] ?? 3)));
+        $bas = time() - $gun * 86400;
+
+        $formlar = $db->fetchAll("
+            SELECT f.ReklamLeadFormlari_id AS id, f.ReklamLeadFormlari_FormAdi AS ad
+            FROM ReklamLeadFormlari f
+            INNER JOIN ReklamFacebookSayfalari s ON s.ReklamFacebookSayfalari_id = f.ReklamLeadFormlari_Sayfa_id AND s.Durum = 1
+            WHERE f.Durum = 1 AND f.ReklamLeadFormlari_FormID NOT LIKE '%[^0-9]%'
+            ORDER BY f.ReklamLeadFormlari_id
+        ");
+
+        $top = ['bulunan' => 0, 'eklendi' => 0, 'kural' => 0, 'karaliste' => 0, 'graph' => 0, 'hata' => 0];
+        $okunan = 0; $okunamayan = 0;
+
+        foreach ($formlar as $f) {
+            $after = null; $sayfa = 0; $formEklenen = 0;
+            do {
+                $r = MetaLeadIsle::formLeadleriniCek($db, (int)$f['id'], $after, 100, $bas,
+                    ['nokta' => 'cron:meta-eksik-lead', 'karaListeLog' => false]);
+                if (!$r['ok']) {
+                    if ($sayfa === 0) $okunamayan++;
+                    echo "  ! #{$f['id']} {$f['ad']}: {$r['hata']}\n";
+                    break;
+                }
+                if ($sayfa === 0) $okunan++;
+                foreach ($top as $k => $_) $top[$k] += (int)($r['sayac'][$k] ?? 0);
+                $formEklenen += (int)$r['sayac']['eklendi'];
+                $after = $r['sonraki'];
+            } while ($after && ++$sayfa < 20);
+
+            if ($formEklenen) echo "  + #{$f['id']} {$f['ad']}: {$formEklenen} lead eklendi\n";
+        }
+
+        $sonuc = sprintf(
+            'Son %d gün, %d form tarandı (%d okunamadı): %d lead bulundu, %d eklendi, %d kurala, %d kara listeye takıldı, %d hata.',
+            $gun, $okunan, $okunamayan, $top['bulunan'], $top['eklendi'], $top['kural'], $top['karaliste'], $top['graph'] + $top['hata']
+        );
+        $durum = ($formlar && $okunan === 0) ? 2 : 1;
+    } catch (Throwable $e) {
+        $sonuc = get_class($e) . ': ' . $e->getMessage();
+        $durum = 2;
+    }
+
+    return ['durum' => $durum, 'sonuc' => $sonuc, 'cikti' => ob_get_clean()];
+}
+
 function gorevMetaGunlukHarcamaOdeme(array $params, $db): array
 {
     ob_start();
@@ -4640,6 +4700,7 @@ function gorevCalistir(string $gorevKodu, array $params, $db): array
         'fikstur_kazi'              => gorevFiksturKazi($params, $db),
         'kurulum_bayi_randevu_bildir' => gorevKurulumBayiRandevuBildir($params, $db),
         'meta_kisitlama_izle'       => gorevMetaKisitlamaIzle($params, $db),
+        'meta_eksik_lead'           => gorevMetaEksikLead($params, $db),
         default                     => throw new RuntimeException("Bilinmeyen görev kodu: {$gorevKodu}"),
     };
 }

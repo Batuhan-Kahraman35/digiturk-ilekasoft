@@ -7,8 +7,8 @@
  *
  * GET  → Meta doğrulaması (hub.verify_token eşleşirse hub.challenge döner)
  * POST → X-Hub-Signature-256 (App Secret) doğrula → her leadgen_id için
- *        sayfanın Page Token'ı ile Graph'tan lead detayını çek →
- *        ReklamLeadKayitlari'na UPSERT (leadgen_id tekrarını engeller).
+ *        MetaLeadIsle::isle() (lead detayı, kurallar, kara liste, Basvurular INSERT;
+ *        leadgen_id tekrarını engeller).
  *
  * ÇOKLU APP: Birden fazla Meta App (ayrı işletme portföyleri) aynı anda desteklenir.
  * Payload hangi app'ten geldiğini söylemediği için tespit imzadan yapılır:
@@ -25,33 +25,13 @@
  */
 
 require_once __DIR__ . '/../admin/db.php';
-require_once __DIR__ . '/../admin/includes/KaraListeHelper.php';
-
-const META_SISTEM_KULLANICI = 1; // OlusturanKullanici (sistem)
+require_once __DIR__ . '/../admin/includes/MetaLeadIsle.php';
 
 /** Basit debug log (logs/meta-webhook.log). */
 function whLog(string $mesaj): void
 {
     $dosya = __DIR__ . '/../logs/meta-webhook.log';
     @file_put_contents($dosya, date('Y-m-d H:i:s') . ' ' . $mesaj . PHP_EOL, FILE_APPEND);
-}
-
-/** Aktif TÜM Meta entegrasyonları (çoklu app). */
-function metaConfigListesi(Database $db): array
-{
-    return $db->fetchAll("
-        SELECT e.Entegrasyonlar_id                 AS EntegrasyonId,
-               e.Entegrasyonlar_Adi                AS Adi,
-               e.Entegrasyonlar_ApiKey             AS AppSecret,
-               e.Entegrasyonlar_BaseURL            AS BaseURL,
-               e.Entegrasyonlar_WebhookVerifyToken AS VerifyToken,
-               k.EntegrasyonKanallari_Sifre        AS SistemToken
-        FROM Entegrasyonlar e
-        LEFT JOIN EntegrasyonKanallari k
-               ON k.EntegrasyonKanallari_Entegrasyon_id = e.Entegrasyonlar_id AND k.Durum = 1
-        WHERE e.Entegrasyonlar_Tip = 'meta' AND e.Durum = 1
-        ORDER BY e.Entegrasyonlar_id
-    ") ?: [];
 }
 
 /**
@@ -71,35 +51,9 @@ function imzadanEntegrasyon(array $liste, string $raw, string $imza): ?array
     return null;
 }
 
-/** appsecret_proof üretir. */
-function appProof(string $token, string $secret): string
-{
-    return hash_hmac('sha256', $token, $secret);
-}
-
-/** Graph GET → ['ok'=>bool,'data'=>array]. */
-function graphGet(string $url): array
-{
-    $ch = curl_init($url);
-    curl_setopt_array($ch, [
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_TIMEOUT        => 30,
-        CURLOPT_SSL_VERIFYPEER => false,
-    ]);
-    $cevap = curl_exec($ch);
-    $kod   = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    $hata  = curl_error($ch);
-    unset($ch);
-    $json = json_decode((string)$cevap, true) ?: [];
-    return ['ok' => ($kod >= 200 && $kod < 300 && !$hata), 'data' => $json, 'kod' => $kod, 'hata' => $hata];
-}
-
-require_once __DIR__ . '/../admin/includes/MetaLeadAlan.php';
-require_once __DIR__ . '/../admin/includes/LeadFormKural.php';
-
 // ─── Akış ──────────────────────────────────────────────────────────────────────
 $db    = Database::getInstance();
-$liste = metaConfigListesi($db);
+$liste = MetaLeadIsle::configListesi($db);
 
 if (!$liste) {
     http_response_code(500);
@@ -162,145 +116,14 @@ foreach (($payload['entry'] ?? []) as $entry) {
         $pid       = (string)($v['page_id'] ?? $pageId);
         if ($leadgenId === '') continue;
 
-        // Tekrar bildirim → atla (idempotent: Basvurular_LeadgenID)
-        $var = $db->fetchOne(
-            "SELECT Basvurular_id FROM Basvurular WHERE Basvurular_LeadgenID = ?",
-            [$leadgenId]
-        );
-        if ($var) { continue; }
+        // Sayfanın Page Token'ı (yoksa System User token fallback); imzası tutan app varsayılan
+        $baglam = MetaLeadIsle::sayfaBaglami($db, $liste, $pid, $cfg);
+        if (!$baglam) { whLog("Token yok sayfa=$pid lead=$leadgenId"); continue; }
 
-        // Sayfanın Page Token'ı (yoksa System User token fallback)
-        $sayfa = $db->fetchOne("
-            SELECT ReklamFacebookSayfalari_id, ReklamFacebookSayfalari_Token,
-                   ReklamFacebookSayfalari_Entegrasyon_id
-            FROM ReklamFacebookSayfalari WHERE ReklamFacebookSayfalari_SayfaID = ?
-        ", [$pid]);
-
-        // Token hangi app'e aitse appsecret_proof o app'in secret'ıyla üretilmeli.
-        // Sayfa başka bir app'e bağlıysa (OAuth ile devredilmiş olabilir) onun config'i kullanılır.
-        $kaynak     = $cfg;
-        $sayfaEntId = (int)($sayfa['ReklamFacebookSayfalari_Entegrasyon_id'] ?? 0);
-        if ($sayfaEntId > 0 && $sayfaEntId !== (int)$cfg['EntegrasyonId']) {
-            foreach ($liste as $c) {
-                if ((int)$c['EntegrasyonId'] === $sayfaEntId) { $kaynak = $c; break; }
-            }
-        }
-
-        $pageToken = trim((string)($sayfa['ReklamFacebookSayfalari_Token'] ?? '')) ?: (string)$kaynak['SistemToken'];
-        if ($pageToken === '') { whLog("Token yok sayfa=$pid lead=$leadgenId"); continue; }
-
-        // Lead detayını çek
-        $url = rtrim((string)$kaynak['BaseURL'], '/') . '/' . $leadgenId . '?' . http_build_query([
-            'fields'           => 'field_data,form_id,created_time',
-            'access_token'     => $pageToken,
-            'appsecret_proof'  => appProof($pageToken, (string)$kaynak['AppSecret']),
-        ]);
-        $r = graphGet($url);
-        if (!$r['ok']) {
-            whLog("Graph HATA lead=$leadgenId kod={$r['kod']} " . ($r['data']['error']['message'] ?? $r['hata']));
-            continue;
-        }
-
-        $fieldData = $r['data']['field_data'] ?? [];
-        $gercekFormId = (string)($r['data']['form_id'] ?? $formId);
-
-        // Form FK eşleşmesi
-        $formFk = null;
-        $f      = null;
-        if ($gercekFormId !== '') {
-            $f = $db->fetchOne(
-                "SELECT ReklamLeadFormlari_id, ReklamLeadFormlari_FormAdi, Durum FROM ReklamLeadFormlari WHERE ReklamLeadFormlari_FormID = ?",
-                [$gercekFormId]
-            );
-            $formFk = $f['ReklamLeadFormlari_id'] ?? null;
-        }
-
-        // Pasif form → lead alınmaz
-        if ($f && (int)$f['Durum'] === 0) {
-            whLog("PASIF FORM atlandi lead=$leadgenId form=$gercekFormId");
-            continue;
-        }
-
-        // Lead alım kuralları (form adına göre). Form henüz DB'de yoksa adı Graph'tan alınır;
-        // ad hiç öğrenilemezse lead kaybolmasın diye alınır.
-        $kurallar = LeadFormKural::kurallar($db);
-        if ($kurallar && $gercekFormId !== '') {
-            $formAdi = (string)($f['ReklamLeadFormlari_FormAdi'] ?? '');
-            if ($formAdi === '') {
-                $rn = graphGet(rtrim((string)$kaynak['BaseURL'], '/') . '/' . $gercekFormId . '?' . http_build_query([
-                    'fields'          => 'name',
-                    'access_token'    => $pageToken,
-                    'appsecret_proof' => appProof($pageToken, (string)$kaynak['AppSecret']),
-                ]));
-                $formAdi = (string)($rn['data']['name'] ?? '');
-            }
-            $engel = $formAdi !== '' ? LeadFormKural::engelNedeni($formAdi, $kurallar) : null;
-            if ($engel) {
-                whLog("KURAL atlandi lead=$leadgenId form=$gercekFormId ($formAdi) neden=" . $engel['neden']);
-                continue;
-            }
-        }
-
-        // Form için hiç alan satırı yoksa (yeni form) soruları çekip varsayılan eşlemeyi kur:
-        // ad soyad / telefon / e-posta kendi alanına, kalanlar Açıklama'ya
-        if ($formFk) {
-            $alanVar = $db->fetchOne(
-                "SELECT TOP 1 ReklamLeadFormAlanlari_id FROM ReklamLeadFormAlanlari WHERE ReklamLeadFormAlanlari_Form_id = ?",
-                [$formFk]
-            );
-            if (!$alanVar) {
-                $rq = graphGet(rtrim((string)$kaynak['BaseURL'], '/') . '/' . $gercekFormId . '?' . http_build_query([
-                    'fields'          => 'questions{key,label,type}',
-                    'access_token'    => $pageToken,
-                    'appsecret_proof' => appProof($pageToken, (string)$kaynak['AppSecret']),
-                ]));
-                if ($rq['ok'] && !empty($rq['data']['questions'])) {
-                    try {
-                        formAlanlariSenkronla($db, (int)$formFk, $rq['data']['questions'], META_SISTEM_KULLANICI);
-                        whLog("Varsayilan alan eslemesi olusturuldu form=$formFk");
-                    } catch (Throwable $e) {
-                        whLog("Varsayilan esleme HATA form=$formFk " . $e->getMessage());
-                    }
-                } else {
-                    whLog("Form sorulari alinamadi form=$formFk kod={$rq['kod']}");
-                }
-            }
-        }
-
-        // Alan eşlemesi (form için tanımlıysa) — yoksa otomatik tahmin devreye girer
-        $a = alanlariEsle($db, $formFk !== null ? (int)$formFk : null, $fieldData);
-
-        // KARA LİSTE — engellenen numara hiç kaydedilmez.
-        $engel = KaraListe::kontrolVeLogla(
-            KaraListe::kayittanGsm([
-                'phoneCountryNumber' => $a['phoneCountryNumber'],
-                'phoneAreaNumber'    => $a['phoneAreaNumber'],
-                'phoneNumber'        => $a['phoneNumber'],
-            ]),
-            'webhook:meta-lead',
-            ['leadgen_id' => $leadgenId, 'form_id' => $gercekFormId, 'alanlar' => $a],
-            null,
-            META_SISTEM_KULLANICI
-        );
-        if ($engel) {
-            whLog("KARA LISTE engel lead=$leadgenId gsm=" . $engel['KaraListe_Deger']);
-            continue;
-        }
-
-        $now = date('Y-m-d H:i:s');
-        try {
-            $db->insert('Basvurular', array_merge($a, [
-                'ReklamLeadFormlari_ID' => $formFk,
-                'Basvurular_LeadgenID'  => $leadgenId,
-                'OlusturanKullanici'    => META_SISTEM_KULLANICI,
-                'OlusturmaTarihi'       => $now,
-                'GuncelleyenKullanici'  => META_SISTEM_KULLANICI,
-                'GuncellemeTarihi'      => $now,
-            ]));
-            $islenen++;
-        } catch (Throwable $e) {
-            whLog("INSERT HATA lead=$leadgenId " . $e->getMessage());
-        }
+        $sonuc = MetaLeadIsle::isle($db, $baglam, $leadgenId, $formId);
+        foreach ($sonuc['notlar'] ?? [] as $not) whLog($not);
+        if ($sonuc['durum'] === 'eklendi')    { $islenen++; }
+        elseif ($sonuc['durum'] !== 'mevcut') { whLog($sonuc['mesaj']); }
     }
 }
 
