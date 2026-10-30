@@ -2749,11 +2749,13 @@ function gorevBasvuruSurecGuncelle(array $params, $db): array
 
         $apiSonuc   = [];
         $grupHatasi = [];   // sonuç metnine yazılır; aksi halde sebep yalnız ekran çıktısında kalır
+        $sorulanNolar = []; // partisi hatasız biten talepler: yanıtı işlenemese de damgalanır
         foreach ($gruplar as $anaBayiId => $nolar) {
             $hedef = $anaBayiId > 0 ? $anaBayiId : null;
             echo "  → Ana bayi " . ($hedef ?? 'varsayılan') . ": " . count($nolar) . " talep sorgulanıyor.\n";
             try {
                 $apiSonuc += irisDurumSorgula($db, $nolar, $hedef);
+                $sorulanNolar = array_merge($sorulanNolar, $nolar);
             } catch (Throwable $ex) {
                 // Limit/bağlantı hatasında bu grubu bırak, diğer bayiler devam etsin
                 $grupHatasi[] = 'Ana bayi ' . ($hedef ?? 'varsayılan') . ': ' . $ex->getMessage();
@@ -2765,6 +2767,7 @@ function gorevBasvuruSurecGuncelle(array $params, $db): array
         $simdi = date('Y-m-d H:i:s');
         $hatali = 0;
         $sorulanlar = [];
+        $sorulanNoSet = array_flip($sorulanNolar);
         // Kontrol edilebilmesi için ID listeleri
         $guncellenenler = []; $degismeyenler = []; $donmeyenler = []; $hatalilar = [];
 
@@ -2772,7 +2775,13 @@ function gorevBasvuruSurecGuncelle(array $params, $db): array
             $id = (int)$k['Basvurular_id'];
             $no = (int)$k['TalepKayitNo'];
             $d  = $apiSonuc[$no] ?? null;
-            if (!$d) { $donmeyenler[] = "#{$id}(talep {$no})"; continue; }
+            if (!$d) {
+                $donmeyenler[] = "#{$id}(talep {$no})";
+                // Sorulup işlenemeyen (responseCode≠0, beklenmeyen biçim) kayıt da damgalanır;
+                // aksi halde kuyruğun başında kalıp her turda aynı kayıtlar sorulur (08.10.2026).
+                if (isset($sorulanNoSet[$no])) $sorulanlar[] = $id;
+                continue;
+            }
 
             $sorulanlar[] = $id;
 
@@ -2877,7 +2886,13 @@ function gorevBasvuruSurecGuncelle(array $params, $db): array
         }
         // API grubu düştüyse tur başarısız sayılır: aksi halde "0 güncellendi,
         // 120 yanıt gelmedi" satırı panelde yeşil [OK] görünür ve kesinti gözden kaçar.
-        $durum = (($hatali > 0 && $guncellenen === 0) || $grupHatasi) ? 2 : 1;
+        // Hiçbir talebe işlenebilir yanıt gelmediyse de tur başarısızdır (yanıt biçimi
+        // değişti / servis responseCode≠0 dönüyor); 08.10.2026'da 3 hafta yeşil görünmüştü.
+        $hepsiYanitsiz = $donmeyen > 0 && $donmeyen === count($kayitlar);
+        if ($hepsiYanitsiz) {
+            $sonuc .= ' | HİÇBİR TALEBE İŞLENEBİLİR YANIT GELMEDİ (yanıt biçimini kontrol edin)';
+        }
+        $durum = (($hatali > 0 && $guncellenen === 0) || $grupHatasi || $hepsiYanitsiz) ? 2 : 1;
 
     } catch (Throwable $e) {
         $sonuc = get_class($e) . ': ' . $e->getMessage();

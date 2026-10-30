@@ -1770,7 +1770,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                     . "--- Süreç Sorgusu (Endpoint 17 — RequestId=" . $talepKayitNo . ") ---\n"
                                     . (($j17 !== null) ? json_encode($j17, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) : $resp17);
 
-                                $data17     = is_array($j17) ? ($j17['data'] ?? $j17['Data'] ?? null) : null;
+                                // data artık talep başına satır dizisi; tek satır servis kuralıyla seçilir
+                                require_once __DIR__ . '/../includes/IrisTalepServisi.php';
+                                $data17     = is_array($j17) ? irisDurumSatirSec($j17['data'] ?? $j17['Data'] ?? null) : null;
                                 $statusCode = is_array($data17) ? ($data17['requestStatusCode'] ?? $data17['RequestStatusCode'] ?? null) : null;
 
                                 if ($statusCode !== null && $statusCode !== '') {

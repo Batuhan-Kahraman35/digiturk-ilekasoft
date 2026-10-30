@@ -535,6 +535,28 @@ function irisYazilacakAlanlar(array $eslesme, array $mevcutKayit, array $durumMa
 }
 
 /**
+ * CheckRequisition yanıtındaki data alanından tek satır seçer.
+ *
+ * Digiturk ~08.10.2026'dan beri data'yı nesne yerine dizi döndürüyor: talep başına
+ * ticket satırları (ör. ISP + NEO). En yüksek ticketID'li (en yeni) satır alınır.
+ * Eski biçim (tek nesne) gelirse olduğu gibi döner.
+ */
+function irisDurumSatirSec($data): ?array
+{
+    if (!is_array($data) || !$data) return null;
+    if (!array_is_list($data)) return $data;
+
+    $secilen = null;
+    foreach ($data as $satir) {
+        if (!is_array($satir)) continue;
+        if ($secilen === null || (int)($satir['ticketID'] ?? 0) > (int)($secilen['ticketID'] ?? 0)) {
+            $secilen = $satir;
+        }
+    }
+    return $secilen;
+}
+
+/**
  * Talep numaralarının süreç durumunu sorgular → [talepNo => data satırı]
  *
  * Digiturk 08.09.2026 sürümünde toplu uç Order/CheckRequisitionList'i KALDIRDI
@@ -579,8 +601,8 @@ function irisDurumSorgula($db, array $talepNolar, ?int $anaBayiId = null, int $b
         if (($r['responseCode'] ?? -1) !== 0) {
             continue;
         }
-        $d = $r['data'] ?? null;
-        if (!is_array($d)) continue;
+        $d = irisDurumSatirSec($r['data'] ?? null);
+        if (!$d) continue;
 
         $donen = (int)($d['requestID'] ?? 0);
         if ($donen > 0) $sonuc[$donen] = $d;
