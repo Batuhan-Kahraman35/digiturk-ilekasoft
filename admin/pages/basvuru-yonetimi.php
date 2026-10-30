@@ -392,7 +392,14 @@ function basvuruAramaWhere(string $search): array {
 }
 
 // ── Excel indir (JSON header'dan ÖNCE — çıktı JSON değil, .xls) ──
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'excel_indir') {
+// excel_sayim: modaldaki "kaç kayıt inecek" önizlemesi, aynı filtrelerle COUNT döner
+$excelAction = $_POST['action'] ?? '';
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && in_array($excelAction, ['excel_indir', 'excel_sayim'], true)) {
+    // Modal seçenekleri
+    $optIsimsizHaric   = ($_POST['o_isimsiz_haric']   ?? '0') === '1';
+    $optIndirilenHaric = ($_POST['o_indirilen_haric'] ?? '0') === '1';
+    $optIsaretle       = ($_POST['o_isaretle']        ?? '0') === '1';
+
     // Filtreler (list ile aynı)
     $search     = trim($_POST['search']['value'] ?? ($_POST['search'] ?? ''));
     $durum      = $_POST['f_basvuru_durum'] ?? '';
@@ -404,6 +411,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'excel
     $sayfaF     = $_POST['f_sayfa']         ?? '';
     $atananF    = $_POST['f_atanan']        ?? '';
     $leadFormF  = $_POST['f_lead_formu']    ?? '';
+    $indirmeF   = $_POST['f_indirme']       ?? '';
     $tarihBas   = trim($_POST['f_tarih_bas'] ?? '');
     $tarihBit   = trim($_POST['f_tarih_bit'] ?? '');
 
@@ -451,6 +459,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'excel
     if (in_array('yok', $lfSecim, true)) { $lfKosul[] = "t.ReklamLeadFormlari_ID IS NULL"; }
     if ($lfIds) { $lfKosul[] = "t.ReklamLeadFormlari_ID IN (" . implode(',', $lfIds) . ")"; }
     if ($lfKosul) { $whereFilt[] = '(' . implode(' OR ', $lfKosul) . ')'; }
+    if ($indirmeF === '1')     { $whereFilt[] = "t.Basvurular_SonExcelIndirmeTarihi IS NOT NULL"; }
+    elseif ($indirmeF === '0') { $whereFilt[] = "t.Basvurular_SonExcelIndirmeTarihi IS NULL"; }
     if (preg_match('/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/', $tarihBas)) {
         $whereFilt[]  = "t.OlusturmaTarihi >= ?";
         $paramsFilt[] = str_replace('T', ' ', $tarihBas) . ':00';
@@ -486,11 +496,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'excel
         $paramsFilt[] = (int)$birim;
     }
 
+    // Modal seçenekleri: ad soyadı boş olanlar / daha önce indirilmişler hariç
+    if ($optIsimsizHaric) {
+        $whereFilt[] = "LTRIM(RTRIM(CONCAT(ISNULL(t.Isim, ''), ISNULL(t.Soyisim, '')))) <> ''";
+    }
+    if ($optIndirilenHaric) {
+        $whereFilt[] = "t.Basvurular_SonExcelIndirmeTarihi IS NULL";
+    }
+
     $wFiltClause = implode(" AND ", $whereFilt);
+
+    if ($excelAction === 'excel_sayim') {
+        header('Content-Type: application/json');
+        $adet = (int)($db->fetchOne("SELECT COUNT(*) AS c FROM Basvurular t WHERE $wFiltClause", $paramsFilt)['c'] ?? 0);
+        echo json_encode(['success' => true, 'adet' => $adet]);
+        exit;
+    }
 
     // Export sorgusu — görünen kolonlar (mükerrer sayımı gibi ağır alt sorgular yok)
     $rows = $db->fetchAll("
         SELECT
+            t.Basvurular_id,
             COALESCE(
               (SELECT TOP 1 b.KullaniciBirim_Adi
                  FROM KullaniciBirimYetkileri kby
@@ -535,7 +561,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'excel
         ORDER BY t.OlusturmaTarihi DESC, t.Basvurular_id DESC
     ", $paramsFilt);
 
-    $filename = 'basvuru_listesi_' . date('Y-m-d_H-i-s') . '.xls';
+    // İndirilen kayıtları işaretle: dosyaya giden ID'lerin aynısı (int, 1000'lik parçalar)
+    if ($optIsaretle && $rows) {
+        $ids = array_map(fn($r) => (int)$r['Basvurular_id'], $rows);
+        foreach (array_chunk($ids, 1000) as $parca) {
+            $db->execute("
+                UPDATE Basvurular SET
+                    Basvurular_ExcelIndirmeSayisi    = ISNULL(Basvurular_ExcelIndirmeSayisi, 0) + 1,
+                    Basvurular_SonExcelIndirmeTarihi = GETDATE(),
+                    Basvurular_SonExcelIndiren_ID    = ?
+                WHERE Basvurular_id IN (" . implode(',', $parca) . ")
+            ", [$kullaniciId]);
+        }
+    }
+
+    $filename ='basvuru_listesi_' . date('Y-m-d_H-i-s') . '.xls';
     header('Content-Type: application/vnd.ms-excel; charset=UTF-8');
     header('Content-Disposition: attachment; filename="' . $filename . '"');
     header('Pragma: no-cache');
@@ -857,6 +897,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $sayfaF     = $_POST['f_sayfa']         ?? '';
                 $atananF    = $_POST['f_atanan']        ?? '';
                 $leadFormF  = $_POST['f_lead_formu']    ?? '';
+                $indirmeF   = $_POST['f_indirme']       ?? '';
                 $tarihBas   = trim($_POST['f_tarih_bas'] ?? '');
                 $tarihBit   = trim($_POST['f_tarih_bit'] ?? '');
 
@@ -908,6 +949,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if (in_array('yok', $lfSecim, true)) { $lfKosul[] = "t.ReklamLeadFormlari_ID IS NULL"; }
                 if ($lfIds) { $lfKosul[] = "t.ReklamLeadFormlari_ID IN (" . implode(',', $lfIds) . ")"; }
                 if ($lfKosul) { $whereFilt[] = '(' . implode(' OR ', $lfKosul) . ')'; }
+                // Excel indirme durumu: '1' → indirilmiş, '0' → hiç indirilmemiş
+                if ($indirmeF === '1')     { $whereFilt[] = "t.Basvurular_SonExcelIndirmeTarihi IS NOT NULL"; }
+                elseif ($indirmeF === '0') { $whereFilt[] = "t.Basvurular_SonExcelIndirmeTarihi IS NULL"; }
                 // datetime-local: "YYYY-MM-DDTHH:MM" → "YYYY-MM-DD HH:MM:SS"
                 if (preg_match('/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/', $tarihBas)) {
                     $whereFilt[]  = "t.OlusturmaTarihi >= ?";
@@ -967,6 +1011,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     11 => 't.OlusturmaTarihi',
                     12 => 'ak.kullanici_ad',
                     13 => 't.ReklamLeadFormlari_ID',
+                    14 => 't.Basvurular_SonExcelIndirmeTarihi',
                 ];
                 $orderIdx = (int)($_POST['order'][0]['column'] ?? 11);
                 $orderBy  = $orderMap[$orderIdx] ?? 't.OlusturmaTarihi';
@@ -1048,6 +1093,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             t.Basvurular_OtpSonMesaj AS OtpSonMesaj,
                             CONVERT(VARCHAR(19), t.Basvurular_OtpOnayTarihi, 120)     AS OtpOnayTarihi,
                             CONVERT(VARCHAR(19), t.Basvurular_OtpGonderimTarihi, 120) AS OtpGonderimTarihi,
+                            t.Basvurular_ExcelIndirmeSayisi AS ExcelIndirmeSayisi,
+                            CONVERT(VARCHAR(19), t.Basvurular_SonExcelIndirmeTarihi, 120) AS SonExcelIndirmeTarihi,
+                            LTRIM(RTRIM(CONCAT(ISNULL(ei.kullanici_ad, ''), ' ', ISNULL(ei.kullanici_soyad, '')))) AS SonExcelIndiren,
                             CONVERT(VARCHAR(19), t.OlusturmaTarihi, 120) AS OlusturmaTarihi
                         FROM Sayfa s
                         INNER JOIN Basvurular t ON t.Basvurular_id = s.Basvurular_id
@@ -1058,6 +1106,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         LEFT JOIN DigiturkAltBayiPersonel p  ON p.DigiturkAltBayiPersonel_Id = t.AltBayiPersonel_ID
                         LEFT JOIN kullanicilar           ak  ON ak.kullanici_id             = t.Basvurular_AtananKullanici_ID
                         LEFT JOIN ReklamLeadFormlari lf ON lf.ReklamLeadFormlari_id = t.ReklamLeadFormlari_ID
+                        LEFT JOIN kullanicilar           ei  ON ei.kullanici_id             = t.Basvurular_SonExcelIndiren_ID
                         $birimApplySql
                         OUTER APPLY (
                             SELECT COUNT(*) AS MukerrerAdet
@@ -1344,7 +1393,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $wParams = [];
                 if ($birimKisitli) {
                     if (empty($izinliBirimler)) {
-                        echo json_encode(['success' => true, 'data' => ['toplam' => 0, 'bugun' => 0, 'atanmamis' => 0, 'ulasilamadi' => 0]]);
+                        echo json_encode(['success' => true, 'data' => ['toplam' => 0, 'bugun' => 0, 'atanmamis' => 0, 'kidemsiz' => 0, 'indirilmemis' => 0]]);
                         break;
                     }
                     [$wS, $pS] = basvuruBirimKisitWhere(
@@ -1372,6 +1421,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'bugun'     => $db->fetchOne("SELECT COUNT(*) AS c FROM Basvurular t WHERE CAST(t.OlusturmaTarihi AS DATE) = CAST(GETDATE() AS DATE) AND $wClause", $wParams)['c'] ?? 0,
                     'atanmamis' => $db->fetchOne("SELECT COUNT(*) AS c FROM Basvurular t WHERE t.Basvurular_AtananKullanici_ID IS NULL AND ($kidemTarih) AND $wClause", $wParams)['c'] ?? 0,
                     'kidemsiz'  => $db->fetchOne("SELECT COUNT(*) AS c FROM Basvurular t WHERE t.Basvurular_AtananKullanici_ID IS NULL AND ($kidemsizTarih) AND $wClause", $wParams)['c'] ?? 0,
+                    'indirilmemis' => $db->fetchOne("SELECT COUNT(*) AS c FROM Basvurular t WHERE t.Basvurular_SonExcelIndirmeTarihi IS NULL AND $wClause", $wParams)['c'] ?? 0,
                 ];
                 echo json_encode(['success' => true, 'data' => $stats]);
                 break;
@@ -1910,7 +1960,7 @@ $dagitLeadFormlari = $db->fetchAll("
 
                 <!-- Info Boxes -->
                 <div class="row mb-3">
-                    <div class="col-md-3 col-sm-6">
+                    <div class="col-xl col-md-4 col-sm-6">
                         <div class="info-box text-bg-primary">
                             <span class="info-box-icon"><i class="bi bi-people"></i></span>
                             <div class="info-box-content">
@@ -1919,7 +1969,7 @@ $dagitLeadFormlari = $db->fetchAll("
                             </div>
                         </div>
                     </div>
-                    <div class="col-md-3 col-sm-6">
+                    <div class="col-xl col-md-4 col-sm-6">
                         <div class="info-box text-bg-success">
                             <span class="info-box-icon"><i class="bi bi-calendar-day"></i></span>
                             <div class="info-box-content">
@@ -1928,7 +1978,7 @@ $dagitLeadFormlari = $db->fetchAll("
                             </div>
                         </div>
                     </div>
-                    <div class="col-md-3 col-sm-6">
+                    <div class="col-xl col-md-4 col-sm-6">
                         <div class="info-box text-bg-warning" title="Kıdemli şablonu: atanmamış + dün 19:00 sonrası oluşturulan başvurular">
                             <span class="info-box-icon"><i class="bi bi-hourglass-split"></i></span>
                             <div class="info-box-content">
@@ -1938,13 +1988,23 @@ $dagitLeadFormlari = $db->fetchAll("
                             </div>
                         </div>
                     </div>
-                    <div class="col-md-3 col-sm-6">
+                    <div class="col-xl col-md-4 col-sm-6">
                         <div class="info-box text-bg-danger" title="Kıdemsiz şablonu: atanmamış + önceki gün 19:00 – dün 19:00 arası + Ulaşılamadı">
                             <span class="info-box-icon"><i class="bi bi-telephone-x"></i></span>
                             <div class="info-box-content">
                                 <span class="info-box-text">Atanmamış (Kıdemsiz)</span>
                                 <span class="info-box-number" id="stat-kidemsiz">0</span>
                                 <span class="progress-description" style="font-size:.7rem;opacity:.75;">Önceki gün 19:00 – dün 19:00, Ulaşılamadı</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-xl col-md-4 col-sm-6">
+                        <div class="info-box text-bg-info" title="Excel'e hiç indirilmemiş başvurular">
+                            <span class="info-box-icon"><i class="bi bi-file-earmark-excel"></i></span>
+                            <div class="info-box-content">
+                                <span class="info-box-text">İndirilmemiş</span>
+                                <span class="info-box-number" id="stat-indirilmemis">0</span>
+                                <span class="progress-description" style="font-size:.7rem;opacity:.75;">Excel'e hiç alınmamış</span>
                             </div>
                         </div>
                     </div>
@@ -2060,6 +2120,14 @@ $dagitLeadFormlari = $db->fetchAll("
                                     </select>
                                 </div>
                                 <div class="col-md-3">
+                                    <label class="form-label">Excel İndirme</label>
+                                    <select class="form-select" name="indirme" id="filter_indirme">
+                                        <option value="">Tümü</option>
+                                        <option value="1">İndirilmiş</option>
+                                        <option value="0">İndirilmemiş</option>
+                                    </select>
+                                </div>
+                                <div class="col-md-3">
                                     <label class="form-label">Başlangıç Tarihi</label>
                                     <input type="datetime-local" class="form-control" name="tarih_bas" id="filter_tarih_bas">
                                 </div>
@@ -2129,6 +2197,7 @@ $dagitLeadFormlari = $db->fetchAll("
                                     <th>Tarih</th>
                                     <th class="text-center">Atanan</th>
                                     <th class="text-center">Reklam</th>
+                                    <th class="text-center" title="Excel'e indirildi mi?">İndirildi</th>
                                     <th class="text-center" style="width:44px">OTP</th>
                                     <th style="width:190px">İşlemler</th>
                                 </tr>
@@ -2195,6 +2264,40 @@ $dagitLeadFormlari = $db->fetchAll("
     </div>
 </div>
 <?php endif; ?>
+
+<!-- Excel İndir Modalı -->
+<div class="modal fade" id="excelModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="bi bi-file-earmark-excel"></i> Excel İndir</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p class="text-muted small mb-3">Filtre panelindeki seçimler uygulanır. Aşağıdaki seçeneklerle listeyi daraltabilirsiniz.</p>
+                <div class="form-check form-switch mb-2">
+                    <input class="form-check-input excel-secenek" type="checkbox" role="switch" id="excelIsimsizHaric" name="o_isimsiz_haric" value="1" checked>
+                    <label class="form-check-label" for="excelIsimsizHaric">Ad Soyad boş olanları indirme</label>
+                </div>
+                <div class="form-check form-switch mb-2">
+                    <input class="form-check-input excel-secenek" type="checkbox" role="switch" id="excelIndirilenHaric" name="o_indirilen_haric" value="1" checked>
+                    <label class="form-check-label" for="excelIndirilenHaric">Daha önce indirilmiş olanları indirme</label>
+                </div>
+                <div class="form-check form-switch mb-3">
+                    <input class="form-check-input" type="checkbox" role="switch" id="excelIsaretle" name="o_isaretle" value="1" checked>
+                    <label class="form-check-label" for="excelIsaretle">İndirilenleri "indirildi" olarak işaretle</label>
+                </div>
+                <div class="alert alert-info py-2 mb-0" id="excelSayimKutu">
+                    <i class="bi bi-info-circle"></i> İndirilecek başvuru: <strong id="excelSayim">...</strong>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal"><i class="bi bi-x-circle"></i> Vazgeç</button>
+                <button type="button" class="btn btn-success" id="btnExcelOnay"><i class="bi bi-download"></i> İndir</button>
+            </div>
+        </div>
+    </div>
+</div>
 
 <!-- OTP Onay Ekranı Modalı (iframe) -->
 <div class="modal fade" id="otpOnayModal" tabindex="-1" aria-hidden="true">
@@ -2393,7 +2496,8 @@ $dagitLeadFormlari = $db->fetchAll("
                     d.f_basvuru_durum   = $('#filter_basvuru_durum').val() || '';
                     d.f_surec_durum     = $('#filter_surec_durum').val() || '';
                     d.f_iletisim_durum  = $('#filter_iletisim_durum').val() || '';
-                    d.f_tarih_bas       = $('#filter_tarih_bas').val() || '';
+                    d.f_indirme         = $('#filter_indirme').val() || '';
+                    d.f_tarih_bas      = $('#filter_tarih_bas').val() || '';
                     d.f_tarih_bit       = $('#filter_tarih_bit').val() || '';
                     return d;
                 },
@@ -2414,6 +2518,7 @@ $dagitLeadFormlari = $db->fetchAll("
                 { data: 'OlusturmaTarihi',   render: d => escapeHtml(d || '-') },
                 { data: null, className: 'text-center', render: (d, t, r) => atananCell(r) },
                 { data: 'LeadFormuID', className: 'text-center', render: (d, t, r) => leadFormuCell(r) },
+                { data: 'SonExcelIndirmeTarihi', className: 'text-center', render: (d, t, r) => excelIndirmeCell(r) },
                 { data: null, className: 'text-center', orderable: false, render: (d, t, r) => otpDurumIkon(r) },
                 { data: null, orderable: false, render: (d, t, r) => islemlerCell(r) }
             ],
@@ -2491,16 +2596,16 @@ $dagitLeadFormlari = $db->fetchAll("
 
         $('#clearFilters').on('click', function () {
             $('#filterForm')[0].reset();
-            $('#filter_birim, #filter_personel, #filter_atanan, #filter_sayfa, #filter_kampanya, #filter_basvuru_durum, #filter_surec_durum, #filter_iletisim_durum').val('').trigger('change');
+            $('#filter_birim, #filter_personel, #filter_atanan, #filter_sayfa, #filter_kampanya, #filter_basvuru_durum, #filter_surec_durum, #filter_iletisim_durum, #filter_indirme').val('').trigger('change');
             $('#filter_lead_formu').val(null).trigger('change');
             dataTable.ajax.reload();
             showToast('Filtreler temizlendi', 'info');
         });
 
-        // ── Excel İndir: aktif filtrelerle gizli form POST ──
-        $('#btnExcelIndir').on('click', function () {
-            const alanlar = {
-                action:            'excel_indir',
+        // ── Excel İndir: önce seçenek modalı, sonra aktif filtrelerle gizli form POST ──
+        function excelAlanlari(action) {
+            return {
+                action:            action,
                 'search[value]':   $('#filter_search').val() || '',
                 f_birim:           $('#filter_birim').val() || '',
                 f_personel:        $('#filter_personel').val() || '',
@@ -2511,9 +2616,38 @@ $dagitLeadFormlari = $db->fetchAll("
                 f_basvuru_durum:   $('#filter_basvuru_durum').val() || '',
                 f_surec_durum:     $('#filter_surec_durum').val() || '',
                 f_iletisim_durum:  $('#filter_iletisim_durum').val() || '',
-                f_tarih_bas:       $('#filter_tarih_bas').val() || '',
-                f_tarih_bit:       $('#filter_tarih_bit').val() || ''
+                f_indirme:         $('#filter_indirme').val() || '',
+                f_tarih_bas:      $('#filter_tarih_bas').val() || '',
+                f_tarih_bit:       $('#filter_tarih_bit').val() || '',
+                o_isimsiz_haric:   $('#excelIsimsizHaric').is(':checked') ? '1' : '0',
+                o_indirilen_haric: $('#excelIndirilenHaric').is(':checked') ? '1' : '0',
+                o_isaretle:        $('#excelIsaretle').is(':checked') ? '1' : '0'
             };
+        }
+
+        // Modal açıkken seçenek değiştikçe "kaç kayıt inecek" sayımı
+        function excelSayimGuncelle() {
+            $('#excelSayim').text('...');
+            $('#btnExcelOnay').prop('disabled', true);
+            $.post('', excelAlanlari('excel_sayim'), function (r) {
+                const adet = r && r.success ? (parseInt(r.adet, 10) || 0) : 0;
+                $('#excelSayim').text(adet.toLocaleString('tr-TR'));
+                $('#excelSayimKutu').toggleClass('alert-info', adet > 0).toggleClass('alert-warning', adet === 0);
+                $('#btnExcelOnay').prop('disabled', adet === 0);
+            }, 'json').fail(function () {
+                $('#excelSayim').text('hesaplanamadı');
+                $('#btnExcelOnay').prop('disabled', false);
+            });
+        }
+
+        $('#btnExcelIndir').on('click', function () {
+            bootstrap.Modal.getOrCreateInstance(document.getElementById('excelModal')).show();
+            excelSayimGuncelle();
+        });
+        $('.excel-secenek').on('change', excelSayimGuncelle);
+
+        $('#btnExcelOnay').on('click', function () {
+            const alanlar = excelAlanlari('excel_indir');
             const form = $('<form>', { method: 'POST', action: '' });
             Object.keys(alanlar).forEach(function (k) {
                 form.append($('<input>', { type: 'hidden', name: k, value: alanlar[k] }));
@@ -2521,7 +2655,12 @@ $dagitLeadFormlari = $db->fetchAll("
             $('body').append(form);
             form.submit();
             form.remove();
+            bootstrap.Modal.getInstance(document.getElementById('excelModal')).hide();
             showToast('Excel dosyası indiriliyor...', 'info');
+            // İşaretleme sunucuda indirmeyle birlikte yapılır; liste ve sayaçlar kısa süre sonra tazelenir
+            if (alanlar.o_isaretle === '1') {
+                setTimeout(function () { loadList(); loadStats(); }, 2500);
+            }
         });
 
         // ── Başvuruları Dağıt ──
@@ -2785,6 +2924,7 @@ $dagitLeadFormlari = $db->fetchAll("
             $('#stat-bugun').text(r.data.bugun);
             $('#stat-atanmamis').text(r.data.atanmamis);
             $('#stat-kidemsiz').text(r.data.kidemsiz);
+            $('#stat-indirilmemis').text(r.data.indirilmemis);
         }, 'json');
         loadKirilim();
     }
@@ -2864,6 +3004,17 @@ $dagitLeadFormlari = $db->fetchAll("
         const cls   = dolu ? 'text-primary' : 'text-muted';
         const title = dolu ? (row.LeadFormuAdi || 'Reklam lead formu') : 'Reklam lead formu yok';
         return `<i class="bi ${icon} ${cls}" style="font-size:1.15rem" title="${escapeHtml(title)}"></i>`;
+    }
+
+    // Excel'e indirildi mi? (son indirme tarihi dolu = indirilmiş)
+    function excelIndirmeCell(row) {
+        if (!row.SonExcelIndirmeTarihi) return '<span class="text-muted">-</span>';
+        const adet  = parseInt(row.ExcelIndirmeSayisi, 10) || 1;
+        const title = `Son indirme: ${row.SonExcelIndirmeTarihi}`
+                    + (row.SonExcelIndiren ? ` — ${row.SonExcelIndiren}` : '')
+                    + ` (${adet} kez)`;
+        const rozet = adet > 1 ? `<span class="badge bg-success ms-1" style="font-size:.65rem">${adet}</span>` : '';
+        return `<i class="bi bi-file-earmark-check-fill text-success" style="font-size:1.15rem" title="${escapeHtml(title)}"></i>${rozet}`;
     }
 
     function telCell(row) {
