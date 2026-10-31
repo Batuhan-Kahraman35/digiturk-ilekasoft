@@ -2710,7 +2710,7 @@ function gorevBasvuruSurecGuncelle(array $params, $db): array
         // Kolonlar b. ile nitelenir: sorgu ana bayiyi çözmek için JOIN içeriyor
         $where = ["b.TalepKayitNo IS NOT NULL", "b.TalepKayitNo > 0"];
         if ($anaBayiFiltre > 0) {
-            $where[] = "alt.DigiturkAltBayiler_AnaBayiId = {$anaBayiFiltre}";
+            $where[] = "COALESCE(alt.DigiturkAltBayiler_AnaBayiId, rab.DigiturkAnaBayiler_Id) = {$anaBayiFiltre}";
             echo "  Ana bayi filtresi: #{$anaBayiFiltre}\n";
         }
         // Sonuçlanmış süreçler Başvuru Durum Yönetimi sayfasındaki "Sonuçlandı" bayrağından okunur
@@ -2724,10 +2724,15 @@ function gorevBasvuruSurecGuncelle(array $params, $db): array
         // Hiç sorulmamışlar önce, sonra en eski sorulanlar
         $kayitlar = $db->fetchAll("
             SELECT TOP {$adet} b.Basvurular_id, b.TalepKayitNo, b.BasvuruSurecDurum_ID, b.Basvurular_YonlendirilenBayi,
-                   alt.DigiturkAltBayiler_AnaBayiId AS AnaBayiId
+                   COALESCE(alt.DigiturkAltBayiler_AnaBayiId, rab.DigiturkAnaBayiler_Id) AS AnaBayiId
             FROM Basvurular b
             LEFT JOIN DigiturkAltBayiPersonel per ON per.DigiturkAltBayiPersonel_Id = b.AltBayiPersonel_ID
             LEFT JOIN DigiturkAltBayiler     alt ON alt.DigiturkAltBayiler_Id = per.DigiturkAltBayiPersonel_AltBayiId
+            -- Personeli boş başvuru (IRIS rapordan eşleşen): ana bayi talebi giren bayi kodundan bulunur
+            OUTER APPLY (SELECT TOP 1 r.IrisRapor_TalebiGirenBayiKodu AS Kod
+                         FROM DigiturkIrisRapor r
+                         WHERE alt.DigiturkAltBayiler_AnaBayiId IS NULL AND r.IrisRapor_TalepId = b.TalepKayitNo) rk
+            LEFT JOIN DigiturkAnaBayiler     rab ON rab.DigiturkAnaBayiler_BayiKodu = rk.Kod
             WHERE {$whereSql}
             ORDER BY CASE WHEN b.BasvuruSurecDurum_KontrolTarihi IS NULL THEN 0 ELSE 1 END,
                      b.BasvuruSurecDurum_KontrolTarihi ASC,
@@ -3980,9 +3985,18 @@ function gorevFiksturKazi(array $params, $db): array
 // sonuç 'eslesti' olacak VE talep başka bir başvuruya bağlı olmayacak.
 // 'personel_eslesmedi' / 'talep_yok' kayıtlarına dokunulmaz, yalnız kontrol
 // tarihleri damgalanır (aynı kayıtlar her turda yeniden sorulmasın diye).
+//
+// yontem=rapor   → gorevIrisTalepRapordanEslestir: talepten başvuruya gider.
+// yontem=telefon → aşağıdaki eski akış (parametre yoksa da bu): başvurudan talebe
+//   gider. Başvuru, talep IRIS'e girilmeden aranınca "talep yok" alıp bekleme_gun
+//   boyunca bir daha sorulmadığı için 19.10.2026'dan sonra eşleşme sıfıra düştü.
 // ═════════════════════════════════════════════════════════════════════════════
 function gorevIrisTalepEslestir(array $params, $db): array
 {
+    if (strtolower(trim($params['yontem'] ?? '')) === 'rapor') {
+        return gorevIrisTalepRapordanEslestir($params, $db);
+    }
+
     ob_start();
     set_time_limit(900);
 
@@ -4153,6 +4167,237 @@ function gorevIrisTalepEslestir(array $params, $db): array
         }
 
         // Tur kesildiyse veya hiç yazma olmadan yalnız hata alındıysa başarısız sayılır (kesinti gözden kaçmasın)
+        $durum = ($turKesildi || ($sayac['hata'] > 0 && $sayac['yazilan'] === 0)) ? 2 : 1;
+
+    } catch (Throwable $e) {
+        $sonuc = get_class($e) . ': ' . $e->getMessage();
+        $durum = 2;
+    }
+
+    return ['durum' => $durum, 'sonuc' => $sonuc, 'cikti' => ob_get_clean()];
+}
+
+/**
+ * Rapordan eşleştirme: DigiturkIrisRapor'daki, detayı henüz çekilmemiş talepler
+ * (oturum hesabının bayisi) yeniden eskiye işlenir. Talep başına bir kez
+ * GetRequisitionDetail çekilir; üye / telefon / adres rapora yazılır, telefonla
+ * talebi olmayan başvuru bulunursa talep ona bağlanır.
+ *
+ * Detayı çekilmemiş talep kalmayınca yalnız yeni gelenler işlenir; geriye dönük
+ * dolum ayrı bir iş değil, görevin doğal sonucudur.
+ *
+ * Parametreler:
+ *   adet         : Bir turda işlenecek talep (vars. 300, en fazla 1000)
+ *   pencere_gun  : Başvuru tarihi talep tarihinin kaç gün öncesi/sonrası olabilir (vars. 30)
+ *   personeli_ez : 1 → dolu AltBayiPersonel_ID IRIS'teki kaydedenle ezilir
+ *   kuru         : 1 → hiçbir şey yazılmaz, yalnız ne olacağı raporlanır
+ *
+ * Süreç kodu yazılmaz (detaydaki kod ccapi koduyla aynı sistem değil); bağlanan
+ * başvuruyu Süreç Durum Güncelleme bir sonraki turunda "hiç sorulmamış" önceliğiyle sorar.
+ */
+function gorevIrisTalepRapordanEslestir(array $params, $db): array
+{
+    ob_start();
+    set_time_limit(1800);
+
+    require_once dirname(__DIR__) . '/admin/includes/IrisTalepServisi.php';
+    require_once dirname(__DIR__) . '/admin/includes/BasvuruLogHelper.php';
+
+    $sonuc = ''; $durum = 1;
+
+    try {
+        $adet        = max(1, min(1000, (int)($params['adet'] ?? 300) ?: 300));
+        $pencere     = max(1, min(180, (int)($params['pencere_gun'] ?? 30) ?: 30));
+        $personeliEz = !empty($params['personeli_ez']);
+        $kuru        = !empty($params['kuru']);
+
+        $o        = irisTalepOturum($db);
+        $bayiKodu = (string)$o['hesap']['bayiKodu'];
+        echo "  IRIS oturumu: {$o['hesap']['ad']} ({$bayiKodu}) — rol {$o['hesap']['rol']}\n";
+
+        // Talep başına tek satır (ISP+NEO / UYDU+ISP taleplerinde rapor 2 satır tutar)
+        $talepler = $db->fetchAll("
+            WITH t AS (
+                SELECT IrisRapor_TalepId, IrisRapor_MemoKayitTipi, IrisRapor_MemoIdTip,
+                       IrisRapor_TalepGirisTarihi, IrisRapor_TalebiGirenPersonel,
+                       ROW_NUMBER() OVER (PARTITION BY IrisRapor_TalepId
+                           ORDER BY CASE IrisRapor_MemoKayitTipi WHEN 'ISP' THEN 0 WHEN 'UYDU' THEN 1 ELSE 2 END) AS sira
+                FROM DigiturkIrisRapor
+                WHERE IrisRapor_DetayTarihi IS NULL AND IrisRapor_TalebiGirenBayiKodu = ? AND IrisRapor_TalepId > 0
+            )
+            SELECT TOP {$adet} * FROM t WHERE sira = 1 ORDER BY IrisRapor_TalepGirisTarihi DESC", [$bayiKodu]);
+
+        $kalan = $db->fetchOne("SELECT COUNT(DISTINCT IrisRapor_TalepId) AS c FROM DigiturkIrisRapor
+                                WHERE IrisRapor_DetayTarihi IS NULL AND IrisRapor_TalebiGirenBayiKodu = ? AND IrisRapor_TalepId > 0",
+                               [$bayiKodu])['c'] ?? 0;
+        echo "  Detayı çekilmemiş talep: {$kalan}, bu tur: " . count($talepler)
+           . " (pencere ±{$pencere} gün)" . ($kuru ? ' [KURU — yazma yok]' : '') . "\n\n";
+
+        if (!$talepler) {
+            irisTalepOturumKapat($o);
+            return ['durum' => 1, 'sonuc' => 'İşlenecek talep yok.', 'cikti' => ob_get_clean()];
+        }
+
+        $perMap   = irisPersonelHaritasi($db);
+        $durumMap = irisDurumKoduHaritasi($db);
+        $simdi    = date('Y-m-d H:i:s');
+
+        $sayac = ['yazilan' => 0, 'zaten_bagli' => 0, 'basvuru_yok' => 0, 'telefon_yok' => 0,
+                  'detay_yok' => 0, 'personel_yok' => 0, 'hata' => 0];
+        $yazilanlar = []; $hatalar = [];
+        $kullanilan = [];   // bu turda bağlanan başvurular (kuru modda DB değişmediği için)
+        $ardisikHata = 0; $turKesildi = false; $ilk = true;
+
+        foreach ($talepler as $t) {
+            $talepNo = (int)$t['IrisRapor_TalepId'];
+            if (!$ilk) usleep(IRIS_CAGRI_BEKLEME * 1000);
+            $ilk = false;
+
+            try {
+                $det = irisTalepDetayGetir($o, [
+                    'RequisitionId' => $talepNo,
+                    'MemoIdType'    => $t['IrisRapor_MemoKayitTipi'],
+                    'MemoCaseType'  => $t['IrisRapor_MemoIdTip'],
+                ]);
+                $ardisikHata = 0;
+            } catch (Throwable $ex) {
+                // Geçici hata: damgalanmaz, sonraki turda tekrar denenir
+                $sayac['hata']++;
+                $hatalar[] = "talep {$talepNo}: " . $ex->getMessage();
+                if (++$ardisikHata >= IRIS_ARDISIK_HATA_LIMIT) {
+                    $turKesildi = true;
+                    echo "  TUR KESİLDİ: art arda {$ardisikHata} IRIS hatası.\n";
+                    break;
+                }
+                continue;
+            }
+
+            // Telefonlar: 10 haneli yerel biçim (0 / 90 öneki atılır)
+            $telefonlar = [];
+            foreach (($det['RequisitionPhones'] ?? []) as $p) {
+                $tel = preg_replace('/\D/', '', ($p['PhoneCode'] ?? '') . ($p['PhoneNumber'] ?? ''));
+                if (strlen($tel) > 10) $tel = substr($tel, -10);
+                if (strlen($tel) === 10 && !in_array($tel, $telefonlar, true)) $telefonlar[] = $tel;
+            }
+            $adr = is_array($det['MemberAddress'] ?? null) ? $det['MemberAddress'] : [];
+
+            $raporVeri = [
+                'IrisRapor_UyeAd'                => mb_substr(trim((string)($det['Name'] ?? '')), 0, 100) ?: null,
+                'IrisRapor_UyeSoyad'             => mb_substr(trim((string)($det['Surname'] ?? '')), 0, 100) ?: null,
+                'IrisRapor_Telefon'              => $telefonlar[0] ?? null,
+                'IrisRapor_Telefonlar'           => $telefonlar ? mb_substr(implode(',', $telefonlar), 0, 200) : null,
+                'IrisRapor_Il'                   => mb_substr(trim((string)($adr['City'] ?? '')), 0, 50) ?: null,
+                'IrisRapor_Ilce'                 => mb_substr(trim((string)($adr['District'] ?? '')), 0, 50) ?: null,
+                'IrisRapor_Adres'                => mb_substr(trim((string)($adr['Address'] ?? '')), 0, 500) ?: null,
+                'IrisRapor_DetayTarihi'          => $simdi,
+                'IrisRapor_EslesmeKontrolTarihi' => $simdi,
+            ];
+            // Detay boş döndüyse (yetki / kayıt yok) yine damgalanır; aksi halde kuyruğun
+            // başında kalıp her turda aynı talep sorulur.
+            if (!$det || empty($det['Id'])) $sayac['detay_yok']++;
+
+            $sonucMetni = '';
+            if (!$det || empty($det['Id'])) {
+                $sonucMetni = 'detay yok';
+            } elseif ($sahip = $db->fetchOne("SELECT TOP 1 Basvurular_id FROM Basvurular WHERE TalepKayitNo = ?", [$talepNo])) {
+                $sayac['zaten_bagli']++;
+                $sonucMetni = "zaten #{$sahip['Basvurular_id']} kaydında";
+            } elseif (!$telefonlar) {
+                $sayac['telefon_yok']++;
+                $sonucMetni = 'talepte telefon yok';
+            } else {
+                // Telefonu tutan, talebi olmayan, tarih penceresindeki en yakın başvuru
+                $kosul = []; $prm = [];
+                foreach ($telefonlar as $tel) {
+                    $kosul[] = "(phoneAreaNumber = ? AND phoneNumber = ?) OR phoneNumber = ?";
+                    array_push($prm, substr($tel, 0, 3), substr($tel, 3), $tel);
+                }
+                $tarih = $t['IrisRapor_TalepGirisTarihi'];
+                $adaylar = $db->fetchAll("
+                    SELECT TOP 5 * FROM Basvurular
+                    WHERE TalepKayitNo IS NULL AND (" . implode(' OR ', $kosul) . ")
+                      AND OlusturmaTarihi BETWEEN DATEADD(DAY, -{$pencere}, ?) AND DATEADD(DAY, {$pencere}, ?)
+                    ORDER BY ABS(DATEDIFF(MINUTE, OlusturmaTarihi, ?)), Basvurular_id DESC",
+                    array_merge($prm, [$tarih, $tarih, $tarih]));
+                $aday = null;
+                foreach ($adaylar as $a) {
+                    if (!isset($kullanilan[(int)$a['Basvurular_id']])) { $aday = $a; break; }
+                }
+
+                if (!$aday) {
+                    $sayac['basvuru_yok']++;
+                    $sonucMetni = 'başvuru yok';
+                } else {
+                    $id       = (int)$aday['Basvurular_id'];
+                    $kaydeden = trim(($det['EntryPersonnelName'] ?? '') . ' ' . ($det['EntryPersonnelSurname'] ?? ''));
+                    if ($kaydeden === '') $kaydeden = (string)($t['IrisRapor_TalebiGirenPersonel'] ?? '');
+                    $per = $perMap[irisAdNormalize($kaydeden)] ?? null;
+                    if (!$per) $sayac['personel_yok']++;
+
+                    $veri = irisYazilacakAlanlar(
+                        ['talep' => ['RequisitionId' => $talepNo], 'detay' => $det, 'personel' => $per],
+                        $aday, $durumMap, $personeliEz, false);
+                    $veri['BasvuruDurum_KontrolTarihi'] = $simdi;
+                    $veri['GuncelleyenKullanici']       = 1;   // cron
+                    $veri['GuncellemeTarihi']           = $simdi;
+                    $kullanilan[$id] = true;
+
+                    $fark = round((strtotime($aday['OlusturmaTarihi']) - strtotime($tarih)) / 3600, 1);
+                    $sonucMetni = "→ #{$id} (" . trim(($aday['Isim'] ?? '') . ' ' . ($aday['Soyisim'] ?? ''))
+                                . " → " . trim(($veri['Isim'] ?? '') . ' ' . ($veri['Soyisim'] ?? ''))
+                                . ", başvuru-talep farkı {$fark} sa, personel " . ($per['adSoyad'] ?? "eşleşmedi: {$kaydeden}") . ")";
+
+                    if (!$kuru) {
+                        try {
+                            $db->update('Basvurular', $veri, ['Basvurular_id' => $id]);
+                            $sonra = $db->fetchOne("SELECT * FROM Basvurular WHERE Basvurular_id = ?", [$id]);
+                            basvuruLogKaydet($db, $id, 'GUNCELLE', $aday, $sonra, 1,
+                                "Cron IRIS rapordan eşleştirme — talep {$talepNo}, kaydeden {$kaydeden}");
+                        } catch (Throwable $ex) {
+                            // Yazılamayan talep damgalanmaz; sonraki turda tekrar denenir
+                            $sayac['hata']++;
+                            $hatalar[] = "#{$id} talep {$talepNo}: " . $ex->getMessage();
+                            echo "  ✗ talep {$talepNo} {$sonucMetni}: " . $ex->getMessage() . "\n";
+                            continue;
+                        }
+                    }
+                    $sayac['yazilan']++;
+                    $yazilanlar[] = $id;
+                }
+            }
+
+            if (!$kuru) {
+                $db->execute("UPDATE DigiturkIrisRapor SET
+                                IrisRapor_UyeAd = ?, IrisRapor_UyeSoyad = ?, IrisRapor_Telefon = ?, IrisRapor_Telefonlar = ?,
+                                IrisRapor_Il = ?, IrisRapor_Ilce = ?, IrisRapor_Adres = ?,
+                                IrisRapor_DetayTarihi = ?, IrisRapor_EslesmeKontrolTarihi = ?
+                              WHERE IrisRapor_TalepId = ?", array_merge(array_values($raporVeri), [$talepNo]));
+            }
+            echo "  " . ($kuru ? '[KURU] ' : '') . "talep {$talepNo} ({$t['IrisRapor_TalepGirisTarihi']}, tel "
+               . ($telefonlar ? implode('/', $telefonlar) : '-') . "): {$sonucMetni}\n";
+        }
+
+        irisTalepOturumKapat($o);
+
+        $sonuc = "{$sayac['yazilan']} talep başvuruya bağlandı"
+               . " ({$sayac['basvuru_yok']} başvuru yok, {$sayac['zaten_bagli']} zaten bağlı"
+               . ($sayac['telefon_yok'] ? ", {$sayac['telefon_yok']} telefonsuz" : '')
+               . ($sayac['detay_yok'] ? ", {$sayac['detay_yok']} detay yok" : '')
+               . ($sayac['personel_yok'] ? ", {$sayac['personel_yok']} personel eşleşmedi" : '')
+               . ($sayac['hata'] ? ", {$sayac['hata']} hata" : '')
+               . "; kalan " . max(0, $kalan - count($talepler)) . ")" . ($kuru ? ' [KURU]' : '');
+
+        if ($yazilanlar) {
+            $sonuc .= ' | Bağlanan: #' . implode(', #', array_slice($yazilanlar, 0, 60))
+                    . (count($yazilanlar) > 60 ? ' … (+' . (count($yazilanlar) - 60) . ')' : '');
+        }
+        if ($hatalar) {
+            echo "\n  HATALAR:\n    " . implode("\n    ", array_slice($hatalar, 0, 50)) . "\n";
+            $sonuc .= ' | Hata: ' . implode(' ; ', array_slice($hatalar, 0, 5));
+        }
+        if ($turKesildi) {
+            $sonuc = 'IRIS ERİŞİLEMİYOR — art arda ' . IRIS_ARDISIK_HATA_LIMIT . ' hatada tur kesildi | ' . $sonuc;
+        }
         $durum = ($turKesildi || ($sayac['hata'] > 0 && $sayac['yazilan'] === 0)) ? 2 : 1;
 
     } catch (Throwable $e) {

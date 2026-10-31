@@ -500,8 +500,14 @@ function irisTalepAra(array $o, string $tel, array $perMap): array
     return ['sonuc' => 'personel_eslesmedi', 'adaylar' => $adaylar];
 }
 
-/** Eşleşme sonucundan Basvurular'a yazılacak alanları üretir (kural bazlı). */
-function irisYazilacakAlanlar(array $eslesme, array $mevcutKayit, array $durumMap, bool $personeliEz = false): array
+/**
+ * Eşleşme sonucundan Basvurular'a yazılacak alanları üretir (kural bazlı).
+ *
+ * @param bool $surecYaz false → BasvuruSurecDurum_ID yazılmaz; detaydaki kod ccapi
+ *                       koduyla aynı sistem değil, süreç cron'u ccapi'den doldurur
+ *                       (rapordan eşleştirme bu modu kullanır)
+ */
+function irisYazilacakAlanlar(array $eslesme, array $mevcutKayit, array $durumMap, bool $personeliEz = false, bool $surecYaz = true): array
 {
     $it  = $eslesme['talep'];
     $det = $eslesme['detay'];
@@ -513,7 +519,7 @@ function irisYazilacakAlanlar(array $eslesme, array $mevcutKayit, array $durumMa
     ];
 
     $surec = isset($det['RequisitonStatus']) ? (int)$det['RequisitonStatus'] : 0;
-    if ($surec > 0) $veri['BasvuruSurecDurum_ID'] = $surec;
+    if ($surecYaz && $surec > 0) $veri['BasvuruSurecDurum_ID'] = $surec;
     if (isset($durumMap[0])) $veri['BasvuruDurum_ID'] = $durumMap[0];
 
     // Durum mesajı: IRIS'in yazdığı başlık (ör. "Tamamlandı", "Teyit Bekliyor")
@@ -521,7 +527,8 @@ function irisYazilacakAlanlar(array $eslesme, array $mevcutKayit, array $durumMa
     if ($mesaj !== '') $veri['BasvuruDurumMesaj'] = mb_substr($mesaj, 0, 500);
 
     // AltBayiPersonel_ID: boşsa yazılır; doluysa yalnızca $personeliEz ile ezilir.
-    if (empty($mevcutKayit['AltBayiPersonel_ID']) || $personeliEz) {
+    // Talep kaydeden personelimizle eşleşmediyse (rapor modu) alana dokunulmaz.
+    if (!empty($eslesme['personel']) && (empty($mevcutKayit['AltBayiPersonel_ID']) || $personeliEz)) {
         $veri['AltBayiPersonel_ID'] = (int)$eslesme['personel']['id'];
     }
 
