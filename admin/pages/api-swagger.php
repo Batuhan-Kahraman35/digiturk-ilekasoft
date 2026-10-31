@@ -90,7 +90,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         APIEndpointler_Endpoint,
                         APIEndpointler_Aciklama,
                         APIEndpointler_ParametreOrnek,
-                        APIEndpointler_YanitOrnek
+                        APIEndpointler_YanitOrnek,
+                        APIEndpointler_Notlar
                     FROM APIEndpointler
                     WHERE Durum = 1
                     ORDER BY APIEndpointler_Id
@@ -217,6 +218,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         .ep-desc { color:#6c757d; font-size:.82rem; margin-left:auto; text-align:right; }
         .ep-body { padding:.9rem; border-top:1px dashed #e3e6ea; display:none; }
         .ep-row.open .ep-body { display:block; }
+        .ep-not { white-space:pre-line; font-size:.85rem; }
         .ep-row.open .ep-head { background:#eef2f7; }
 
         .kategori-baslik { font-weight:700; font-size:1rem; margin:1rem 0 .5rem; padding-bottom:.3rem; border-bottom:2px solid #0d6efd; color:#0d6efd; }
@@ -475,6 +477,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 const id = ep.APIEndpointler_Id;
                 const yanitOrnek = prettyJson(ep.APIEndpointler_YanitOrnek);
                 const paramOrnek = ep.APIEndpointler_ParametreOrnek || '';
+                const notAlani = ep.APIEndpointler_Notlar ? `
+                        <div class="alert alert-info ep-not mb-3"><i class="bi bi-info-circle"></i> ${escapeHtml(ep.APIEndpointler_Notlar)}</div>` : '';
 
                 const bodyAlani = hasBody ? `
                     <div class="mb-2">
@@ -497,7 +501,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         <span class="ep-path">/api/${escapeHtml(gwPath)}</span>
                         <span class="ep-desc">${escapeHtml(ep.APIEndpointler_Aciklama || '')}</span>
                     </div>
-                    <div class="ep-body">
+                    <div class="ep-body">${notAlani}
                         <div class="row g-3">
                             <div class="col-lg-6">
                                 <div class="small mb-2">
@@ -792,7 +796,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         host: ['{{base_url}}'],
                         path: ['api', ...segments]
                     },
-                    description: ep.APIEndpointler_Aciklama || ''
+                    description: [ep.APIEndpointler_Aciklama, ep.APIEndpointler_Notlar].filter(Boolean).join('\n\n')
                 };
 
                 if (hasBody) {

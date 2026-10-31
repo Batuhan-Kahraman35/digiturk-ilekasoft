@@ -1313,11 +1313,48 @@ function otpAktifKanalId($db): ?int
 }
 
 /**
+ * Servis token'ıyla gelen istekte istemci IP'sini web sayfalarının IP alanında arar
+ * (ReklamFacebookSayfalari_SayfaID, "Dev: x, Prod: y" gibi çoklu değer olabilir).
+ * Eşleşen sayfalar TEK birime çıkıyorsa o sayfaların en küçük id'li aktif formunu döndürür;
+ * birden fazla birime çıkıyorsa (paylaşımlı IP) belirsizdir → null.
+ */
+function otpServisIpFormu($db): ?int
+{
+    $ip = apiIstemciIp();
+    if (!$ip) return null;
+
+    $tarih = "kby.Durum = 1
+        AND (kby.KullaniciBirimYetkileri_BaslangicTarihi IS NULL OR kby.KullaniciBirimYetkileri_BaslangicTarihi <= GETDATE())
+        AND (kby.KullaniciBirimYetkileri_BitisTarihi     IS NULL OR kby.KullaniciBirimYetkileri_BitisTarihi     >= GETDATE())";
+    $adaylar = $db->fetchAll("
+        SELECT s.ReklamFacebookSayfalari_id AS sayfa_id, s.ReklamFacebookSayfalari_SayfaID AS ipler,
+               (SELECT MIN(f.ReklamLeadFormlari_id) FROM ReklamLeadFormlari f
+                 WHERE f.ReklamLeadFormlari_Sayfa_id = s.ReklamFacebookSayfalari_id AND f.Durum = 1) AS form_id,
+               (SELECT STRING_AGG(CAST(kby.KullaniciBirimYetkileri_Birim_id AS VARCHAR(10)), ',')
+                  FROM KullaniciBirimYetkileri kby
+                 WHERE kby.KullaniciBirimYetkileri_ReklamSayfa_id = s.ReklamFacebookSayfalari_id AND $tarih) AS birimler
+        FROM ReklamFacebookSayfalari s
+        WHERE s.Durum = 1 AND s.ReklamFacebookSayfalari_SayfaID LIKE ?
+    ", ['%' . $ip . '%']);
+
+    $birimler = [];
+    $formId   = null;
+    foreach ($adaylar as $a) {
+        // LIKE ön eleme; tam eşleşme için alan IP parçalarına ayrılır (bir IP, başka bir IP'nin alt dizesi olarak eşleşmesin)
+        preg_match_all('/[0-9a-fA-F:.]+/', (string)$a['ipler'], $m);
+        if (!in_array($ip, $m[0], true)) continue;
+        foreach (array_filter(explode(',', (string)$a['birimler'])) as $b) $birimler[(int)$b] = true;
+        if ($a['form_id'] !== null && ($formId === null || (int)$a['form_id'] < $formId)) $formId = (int)$a['form_id'];
+    }
+    return (count($birimler) === 1) ? $formId : null;
+}
+
+/**
  * GSM'i Basvurular'da bulur; yoksa oluşturur → Basvurular_id.
- * $personelId verilirse YALNIZ yeni kayda yazılır (birim çözümü için).
+ * $personelId / $formId verilirse YALNIZ yeni kayda yazılır (birim çözümü için).
  * Mevcut kayda dokunulmaz: aynı GSM farklı birimlerden gelebilir, sahiplik değişmemeli.
  */
-function otpBasvuruBulVeyaOlustur($db, string $gsm, string $aciklama, ?int $personelId = null): int
+function otpBasvuruBulVeyaOlustur($db, string $gsm, string $aciklama, ?int $personelId = null, ?int $formId = null): int
 {
     $b = $db->fetchOne("
         SELECT TOP 1 Basvurular_id
@@ -1334,6 +1371,7 @@ function otpBasvuruBulVeyaOlustur($db, string $gsm, string $aciklama, ?int $pers
         'phoneNumber'          => substr($gsm, 5),
         'Basvuru_Aciklama'     => $aciklama,
         'AltBayiPersonel_ID'   => $personelId,
+        'ReklamLeadFormlari_ID' => $formId,
         'OlusturanKullanici'   => 0,
         'OlusturmaTarihi'      => $now,
         'GuncelleyenKullanici' => 0,
@@ -1382,7 +1420,9 @@ function handleOtpGonder($db, string $rawBody, string $method): void
     $kanalTipId = (int)($kt['EntegrasyonKanalTipleri_id'] ?? 0);
     $kod        = (string)($kt['EntegrasyonKanalTipleri_Kod'] ?? '3');
 
-    $basvuruId = otpBasvuruBulVeyaOlustur($db, $gsm, 'API OTP gönderimi', $personelId);
+    // Servis token'ında personel yok → birim, istemci IP'sinin kayıtlı olduğu web sayfasının formundan
+    $formId    = $personelId ? null : otpServisIpFormu($db);
+    $basvuruId = otpBasvuruBulVeyaOlustur($db, $gsm, 'API OTP gönderimi', $personelId, $formId);
     $now = date('Y-m-d H:i:s');
 
     // Sınırsız kural: daha önce onaylıysa SMS atma
