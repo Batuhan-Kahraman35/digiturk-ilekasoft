@@ -1284,7 +1284,7 @@ function otpTokenPersonel($db): array
         jsonOut(['data' => null, 'responseCode' => 1, 'responseMessage' => 'Token gerekli (Authorize alanına Login token\'ını girin).'], 401);
     }
     $per = $db->fetchOne("
-        SELECT DigiturkAltBayiPersonel_Id
+        SELECT DigiturkAltBayiPersonel_Id, DigiturkAltBayiPersonel_AltBayiId
         FROM DigiturkAltBayiPersonel
         WHERE DigiturkAltBayiPersonel_Token = ? AND Durum = 1
     ", [$token]);
@@ -1351,10 +1351,11 @@ function otpServisIpFormu($db): ?int
 
 /**
  * GSM'i Basvurular'da bulur; yoksa oluşturur → Basvurular_id.
- * $personelId / $formId verilirse YALNIZ yeni kayda yazılır (birim çözümü için).
+ * $personelId / $formId / $musteri verilirse YALNIZ yeni kayda yazılır (birim çözümü için).
  * Mevcut kayda dokunulmaz: aynı GSM farklı birimlerden gelebilir, sahiplik değişmemeli.
+ * $musteri: Otp/Gonder gövdesindeki name / surname / mail (boş olanlar yazılmaz).
  */
-function otpBasvuruBulVeyaOlustur($db, string $gsm, string $aciklama, ?int $personelId = null, ?int $formId = null): int
+function otpBasvuruBulVeyaOlustur($db, string $gsm, string $aciklama, ?int $personelId = null, ?int $formId = null, array $musteri = []): int
 {
     $b = $db->fetchOne("
         SELECT TOP 1 Basvurular_id
@@ -1369,6 +1370,9 @@ function otpBasvuruBulVeyaOlustur($db, string $gsm, string $aciklama, ?int $pers
         'phoneCountryNumber'   => substr($gsm, 0, 2),
         'phoneAreaNumber'      => substr($gsm, 2, 3),
         'phoneNumber'          => substr($gsm, 5),
+        'Isim'                 => isset($musteri['name'])    ? mb_substr($musteri['name'], 0, 100)    : null,
+        'Soyisim'              => isset($musteri['surname']) ? mb_substr($musteri['surname'], 0, 100) : null,
+        'email'                => isset($musteri['mail'])    ? mb_substr($musteri['mail'], 0, 255)    : null,
         'Basvuru_Aciklama'     => $aciklama,
         'AltBayiPersonel_ID'   => $personelId,
         'ReklamLeadFormlari_ID' => $formId,
@@ -1382,7 +1386,12 @@ function otpBasvuruBulVeyaOlustur($db, string $gsm, string $aciklama, ?int $pers
 /**
  * POST /api/Otp/Gonder
  * Header: Token: <Login token>
- * Body: { "gsm":"905XXXXXXXXX", "processType":"3"?, "name"?, "surname"?, "mail"?, "gender"?, "adress"?, "birthDate"? }
+ * Body: { "gsm":"905XXXXXXXXX", "processType":"3"?, "name"?, "surname"?, "mail"?, "gender"?, "adress"?, "birthDate"?,
+ *         "reklamLeadFormId"?, "aciklama"? }
+ * reklamLeadFormId (opsiyonel): CreateSatellite'taki gibi token→altbayi→birim ile doğrulanır,
+ * yalnız YENİ başvuru kaydına yazılır; yetkisizse yok sayılır.
+ * aciklama (opsiyonel): serbest metin (ör. şehir, paket); YENİ kayıtta Basvuru_Aciklama'ya yazılır.
+ * name / surname / mail YENİ kayıtta Isim / Soyisim / email kolonlarına da yazılır.
  * GSM daha önce onaylıysa SMS gönderilmez, doğrudan onaylı döner (sınırsız kural).
  */
 function handleOtpGonder($db, string $rawBody, string $method): void
@@ -1420,9 +1429,23 @@ function handleOtpGonder($db, string $rawBody, string $method): void
     $kanalTipId = (int)($kt['EntegrasyonKanalTipleri_id'] ?? 0);
     $kod        = (string)($kt['EntegrasyonKanalTipleri_Kod'] ?? '3');
 
+    // Personel token'ı: gövdedeki reklamLeadFormId yetkiliyse kullanılır (Order/Create* ile aynı kural).
     // Servis token'ında personel yok → birim, istemci IP'sinin kayıtlı olduğu web sayfasının formundan
-    $formId    = $personelId ? null : otpServisIpFormu($db);
-    $basvuruId = otpBasvuruBulVeyaOlustur($db, $gsm, 'API OTP gönderimi', $personelId, $formId);
+    if ($personelId) {
+        $formIdReq = (int)($in['reklamLeadFormId'] ?? 0);
+        $altBayiId = (int)($per['DigiturkAltBayiPersonel_AltBayiId'] ?? 0);
+        $formId    = ($formIdReq > 0 && $altBayiId > 0 && reklamLeadFormYetkiliMi($db, $altBayiId, $formIdReq))
+            ? $formIdReq : null;
+    } else {
+        $formId = otpServisIpFormu($db);
+    }
+    $musteri = [];
+    foreach (['name','surname','mail','gender','adress','birthDate'] as $f) {
+        $v = trim((string)($in[$f] ?? ''));
+        if ($v !== '') $musteri[$f] = $v;
+    }
+    $aciklama  = mb_substr(trim((string)($in['aciklama'] ?? '')), 0, 500) ?: 'API OTP gönderimi';
+    $basvuruId = otpBasvuruBulVeyaOlustur($db, $gsm, $aciklama, $personelId, $formId, $musteri);
     $now = date('Y-m-d H:i:s');
 
     // Sınırsız kural: daha önce onaylıysa SMS atma
@@ -1445,12 +1468,6 @@ function handleOtpGonder($db, string $rawBody, string $method): void
 
     // smsFormat: "true" → link SMS ile müşteriye gider; "false" (varsayılan) → link host'a, yanıtta url döner
     $smsFormat = (strtolower(trim((string)($in['smsFormat'] ?? 'false'))) === 'true');
-
-    $musteri = [];
-    foreach (['name','surname','mail','gender','adress','birthDate'] as $f) {
-        $v = trim((string)($in[$f] ?? ''));
-        if ($v !== '') $musteri[$f] = $v;
-    }
 
     $res = EntegrasyonHelper::digiturkBasvuruGonder($otpKanalId, $gsm, $kod, $musteri, $smsFormat, 0, $basvuruId);
     if ($res['durum'] === 'hata') {
