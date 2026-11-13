@@ -228,12 +228,11 @@ function reklamSorgu(object $db, string $tarih): array {
 }
 
 /**
- * Reklam gideri satırlarına Meta canlı verisini ekler: harcanan (KDV dahil), lead, lead başı maliyet.
+ * Reklam gideri satırlarına Meta canlı verisini ekler: harcanan (KDV hariç), lead, lead başı maliyet.
  * Hesap → bayi eşlemesi reklamSorgu() ile aynı: o tarihte geçerli KullaniciBirimYetkileri.
  * Bayiye bağlı olmayan hesaplar "Atanmamış" satırında toplanır. Meta hatası raporu bozmaz (değerler null).
  */
 function reklamMetaEkle(object $db, array $reklam, string $tarih): array {
-    $kdvOrani = 20; // % — guncel-borc-bakiyeleri.php varsayılanı ile aynı
     $bayiler  = [];
     foreach ($reklam as $r) {
         $bayiler[$r['bayi']] = ['bayi' => $r['bayi'], 'tutar' => (float)$r['tutar'], 'harcanan' => null, 'lead' => null, 'lead_maliyet' => null];
@@ -269,7 +268,7 @@ function reklamMetaEkle(object $db, array $reklam, string $tarih): array {
         if ($m['spend'] <= 0 && $m['lead'] <= 0) continue;
         $bayi = $harita[$m['act_id']] ?? 'Atanmamış';
         if (!isset($bayiler[$bayi])) $bayiler[$bayi] = ['bayi' => $bayi, 'tutar' => 0.0, 'harcanan' => null, 'lead' => null, 'lead_maliyet' => null];
-        $bayiler[$bayi]['harcanan'] = ($bayiler[$bayi]['harcanan'] ?? 0) + $m['spend'] * (1 + $kdvOrani / 100);
+        $bayiler[$bayi]['harcanan'] = ($bayiler[$bayi]['harcanan'] ?? 0) + $m['spend'];   // KDV hariç (Meta spend)
         $bayiler[$bayi]['lead']     = ($bayiler[$bayi]['lead'] ?? 0) + $m['lead'];
     }
     foreach ($bayiler as &$b) {
@@ -302,9 +301,9 @@ function onayAdetSorgu(object $db, string $tarih): array {
 }
 
 /**
- * Satış başı maliyet = Birim HARCANAN (Meta canlı, KDV dahil) / Birim onay adedi (ISP + TV TOPLAM).
+ * Satış başı maliyet = Birim HARCANAN (Meta canlı, KDV hariç) / Birim onay adedi (ISP + TV TOPLAM).
  * $reklam, reklamMetaEkle() çıktısıdır. Meta verisi yoksa (harcanan null) maliyet hesaplanmaz.
- * NOT: cron/tasks.php satisBasiMaliyet() hâlâ Odemeler gideri (KDV hariç) ile hesaplar.
+ * NOT: cron/tasks.php satisBasiMaliyet() Odemeler gideri (KDV hariç) ile hesaplar.
  */
 function maliyetHesapla(array $reklam, array $onay): array {
     $adetMap = [];
@@ -612,7 +611,7 @@ $raporTarihi = $sonKayit['son_tarih']
                                 <thead>
                                     <tr>
                                         <th>BAYİ İSMİ</th>
-                                        <th title="Meta canlı harcama, KDV dahil">HARCANAN</th>
+                                        <th title="Meta canlı harcama, KDV hariç">HARCANAN</th>
                                         <th>LEAD</th>
                                         <th>LEAD BAŞI MALİYET</th>
                                     </tr>
