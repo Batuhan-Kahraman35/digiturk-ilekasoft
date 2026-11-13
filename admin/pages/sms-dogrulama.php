@@ -8,6 +8,7 @@ require_once __DIR__ . '/../auth.php';
 require_once __DIR__ . '/../includes/PageAuth.php';
 require_once __DIR__ . '/../includes/EntegrasyonHelper.php';
 require_once __DIR__ . '/../includes/KaraListeHelper.php';
+require_once __DIR__ . '/../includes/BasvuruLogHelper.php';
 requireAuth();
 
 $user = Auth::user();
@@ -316,7 +317,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             'OlusturmaTarihi'    => $now,
                             'GuncelleyenKullanici' => $user['kullanici_id'],
                             'GuncellemeTarihi'   => $now,
+                            // Yeni kayıt gönderene atanır (basvuru-form ile aynı; dağıtım havuzuna girmez)
+                            'Basvurular_AtananKullanici_ID' => $user['kullanici_id'],
+                            'Basvurular_AtamaTarihi'        => $now,
                         ]);
+                        if ($basvuruId) {
+                            $logSonrasi = $db->fetchOne("SELECT * FROM Basvurular WHERE Basvurular_id = ?", [(int)$basvuruId]);
+                            basvuruLogKaydet($db, (int)$basvuruId, 'EKLE', null, $logSonrasi, $user['kullanici_id'], 'SMS Doğrulama toplu gönderimden eklendi');
+                        }
                         $musteri = [];
                     }
 

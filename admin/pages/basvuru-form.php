@@ -34,6 +34,10 @@ if (!$editMode && !$permissions['can_add']) PageAuth::accessDenied('Ekleme yetki
 $birimKisitli   = (!$permissions['is_admin'] && !empty($permissions['can_view_birim']));
 $izinliBirimler = [];
 
+// KENDİ KAYITLARINI GÖR kısıtı: admin değil + kendi_kullanicini_gor → yalnız kendi oluşturduğu veya kendisine atanan
+$kendiKisitli = (!$permissions['is_admin'] && !empty($permissions['can_view_own_records']));
+$kullaniciId  = (int)$user['kullanici_id'];
+
 if ($birimKisitli) {
     $kb = $db->fetchOne("SELECT kullanici_birim_id FROM kullanicilar WHERE kullanici_id = ?", [$user['kullanici_id']]);
     $kullaniciBirimId = $kb['kullanici_birim_id'] ?? null;
@@ -51,7 +55,69 @@ if ($birimKisitli) {
     }
 }
 
-function basvuruBirimKisitWhere(array $izinliBirimler, string $leadIdExpr, string $perIdExpr, string $altBayiIdExpr, string $leadFormIdExpr): array {
+// =====================================================================
+// ALAN BAZLI YETKİ (Menu_SayfaAlanlari + Menu_SayfaAlanYetkileri)
+// Departman–alan kaydı yoksa alan görünür + düzenlenir. Admin her zaman tüm alanlar.
+// Başvuru durumu AlanKilitle=1 (TAMAM vb.) olan kayıtta yalnız KilitliDuzenle=1 alanlar düzenlenir.
+// =====================================================================
+$alanSayfaId  = (int)($db->fetchOne("SELECT TOP 1 sayfalar_id FROM Menu_Sayfalar WHERE sayfalar_sayfa_url LIKE ? AND sayfalar_durum = 1", ['%' . $parentPagefile])['sayfalar_id'] ?? 0);
+$alanAdmin    = !empty($permissions['is_admin']);
+$formKayitId  = ($_SERVER['REQUEST_METHOD'] === 'POST') ? (int)($_POST['id'] ?? 0) : (int)($_GET['id'] ?? 0);
+$alanYetki    = $alanAdmin ? [] : alanYetkileriGetir($db, $alanSayfaId, (int)($user['departman_id'] ?? 0));
+$kayitKilitli = basvuruKayitKilitliMi($db, $formKayitId);
+
+$alanGor = function (string $kod) use ($alanAdmin, $alanYetki, $formKayitId): bool {
+    if ($alanAdmin || !isset($alanYetki[$kod])) return true;
+    if ($kod === 'AltBayiPersonel_ID' && $formKayitId === 0) return true;   // yeni kayıtta zorunlu alan
+    return (int)$alanYetki[$kod]['gor'] === 1;
+};
+$alanDuzenle = function (string $kod) use ($alanAdmin, $alanYetki, $formKayitId, $kayitKilitli): bool {
+    if ($alanAdmin || !isset($alanYetki[$kod])) return true;
+    if ($kod === 'AltBayiPersonel_ID' && $formKayitId === 0) return true;
+    $y = $alanYetki[$kod];
+    return (int)$y['gor'] === 1 && (int)$y['duzenle'] === 1
+        && (!$kayitKilitli || (int)$y['kilitli_duzenle'] === 1);
+};
+// Form öğesi için disabled + etiket kilit ikonu
+$alanRo  = fn(string $kod): string => $alanDuzenle($kod) ? '' : 'disabled';
+$alanIco = function (string $kod) use ($alanDuzenle, $alanYetki, $kayitKilitli): string {
+    if ($alanDuzenle($kod)) return '';
+    $tamamKilidi = $kayitKilitli && isset($alanYetki[$kod]) && (int)$alanYetki[$kod]['duzenle'] === 1;
+    $baslik = $tamamKilidi ? 'Başvuru tamamlandığı için değiştirilemez' : 'Bu departman değiştiremez';
+    return ' <i class="bi bi-lock-fill text-muted small" title="' . $baslik . '"></i>';
+};
+
+/** Departmanın sayfa alan yetkileri: [kod => [id, kod, etiket, bolum, gor, duzenle, kilitli_duzenle]] */
+function alanYetkileriGetir($db, int $sayfaId, int $departmanId): array {
+    $rows = $db->fetchAll("
+        SELECT a.Menu_SayfaAlanlari_id AS id, a.Menu_SayfaAlanlari_Kod AS kod,
+               a.Menu_SayfaAlanlari_Etiket AS etiket, a.Menu_SayfaAlanlari_Bolum AS bolum,
+               CAST(ISNULL(y.Menu_SayfaAlanYetkileri_Gor, 1) AS INT)            AS gor,
+               CAST(ISNULL(y.Menu_SayfaAlanYetkileri_Duzenle, 1) AS INT)        AS duzenle,
+               CAST(ISNULL(y.Menu_SayfaAlanYetkileri_KilitliDuzenle, 1) AS INT) AS kilitli_duzenle
+        FROM Menu_SayfaAlanlari a
+        LEFT JOIN Menu_SayfaAlanYetkileri y
+               ON y.Menu_SayfaAlanYetkileri_Alan_id = a.Menu_SayfaAlanlari_id
+              AND y.Menu_SayfaAlanYetkileri_Departman_id = ? AND y.Durum = 1
+        WHERE a.Menu_SayfaAlanlari_Sayfa_id = ? AND a.Durum = 1
+        ORDER BY a.Menu_SayfaAlanlari_Sira
+    ", [$departmanId, $sayfaId]);
+    $out = [];
+    foreach ($rows as $r) $out[$r['kod']] = $r;
+    return $out;
+}
+
+/** Başvurunun başvuru durumu alanları kilitliyor mu (BasvuruDurum_AlanKilitle = 1 → TAMAM vb.) */
+function basvuruKayitKilitliMi($db, int $basvuruId): bool {
+    if ($basvuruId <= 0) return false;
+    return (bool)$db->fetchOne("
+        SELECT TOP 1 1 AS v FROM Basvurular b
+        INNER JOIN BasvuruDurum d ON d.BasvuruDurum_id = b.BasvuruDurum_ID
+        WHERE b.Basvurular_id = ? AND d.BasvuruDurum_AlanKilitle = 1
+    ", [$basvuruId]);
+}
+
+function basvuruBirimKisitWhere(array $izinliBirimler, string $leadIdExpr, string $perIdExpr, string $altBayiIdExpr, string $leadFormIdExpr, string $olusturanExpr = ''): array {
     $ph = implode(',', array_fill(0, count($izinliBirimler), '?'));
     $tarih = "kby.Durum = 1
           AND (kby.KullaniciBirimYetkileri_BaslangicTarihi IS NULL OR kby.KullaniciBirimYetkileri_BaslangicTarihi <= GETDATE())
@@ -77,9 +143,18 @@ function basvuruBirimKisitWhere(array $izinliBirimler, string $leadIdExpr, strin
             WHERE f.ReklamLeadFormlari_id = $leadFormIdExpr
               AND kby.KullaniciBirimYetkileri_Birim_id IN ($ph)
               AND $tarih
-        )
-    )";
-    return [$sql, array_merge($izinliBirimler, $izinliBirimler, $izinliBirimler)];
+        )";
+    $params = array_merge($izinliBirimler, $izinliBirimler, $izinliBirimler);
+    if ($olusturanExpr !== '') {
+        // Bağ yoksa (Personel/ApiLead/ReklamForm hepsi NULL) → oluşturan kullanıcının birimine düşer (OTP toplu kayıtları)
+        $sql .= "
+        OR ($perIdExpr IS NULL AND $leadIdExpr IS NULL AND $leadFormIdExpr IS NULL
+            AND EXISTS (SELECT 1 FROM kullanicilar kuc
+                        WHERE kuc.kullanici_id = $olusturanExpr AND kuc.kullanici_birim_id IN ($ph)))";
+        $params = array_merge($params, $izinliBirimler);
+    }
+    $sql .= ")";
+    return [$sql, $params];
 }
 
 function basvuruKayitBirimYetkiliMi($db, array $izinliBirimler, int $basvuruId): bool {
@@ -89,9 +164,16 @@ function basvuruKayitBirimYetkiliMi($db, array $izinliBirimler, int $basvuruId):
         't.CallCenterApiLead_ID',
         't.AltBayiPersonel_ID',
         '(SELECT pp.DigiturkAltBayiPersonel_AltBayiId FROM DigiturkAltBayiPersonel pp WHERE pp.DigiturkAltBayiPersonel_Id = t.AltBayiPersonel_ID)',
-        't.ReklamLeadFormlari_ID'
+        't.ReklamLeadFormlari_ID',
+        't.OlusturanKullanici'
     );
     $row = $db->fetchOne("SELECT TOP 1 1 AS v FROM Basvurular t WHERE t.Basvurular_id = ? AND $w", array_merge([$basvuruId], $p));
+    return (bool)$row;
+}
+
+/** Tekil başvurunun, kullanıcının kendi oluşturduğu VEYA kendisine atanan kayıt olup olmadığı (kendi_gor kısıtı) */
+function basvuruKayitKendiMi($db, int $kullaniciId, int $basvuruId): bool {
+    $row = $db->fetchOne("SELECT TOP 1 1 AS v FROM Basvurular WHERE Basvurular_id = ? AND (OlusturanKullanici = ? OR Basvurular_AtananKullanici_ID = ?)", [$basvuruId, $kullaniciId, $kullaniciId]);
     return (bool)$row;
 }
 
@@ -418,6 +500,51 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             exit;
         }
 
+        // Sayfa Yetki modalı — departmanın alan yetkileri (yalnız admin)
+        if ($action === 'alan_yetki_getir') {
+            if (!$alanAdmin) throw new Exception('Bu işlem için yetkiniz yok!');
+            $depId = (int)($_POST['departman_id'] ?? 0);
+            if ($depId <= 0) throw new Exception('Departman seçiniz.');
+            echo json_encode(['success' => true, 'data' => array_values(alanYetkileriGetir($db, $alanSayfaId, $depId))]);
+            exit;
+        }
+
+        // Sayfa Yetki modalı — kaydet (her alan için MERGE)
+        if ($action === 'alan_yetki_kaydet') {
+            if (!$alanAdmin) throw new Exception('Bu işlem için yetkiniz yok!');
+            $depId = (int)($_POST['departman_id'] ?? 0);
+            if ($depId <= 0) throw new Exception('Departman seçiniz.');
+            $gelen = json_decode((string)($_POST['yetkiler'] ?? '[]'), true);
+            if (!is_array($gelen)) throw new Exception('Geçersiz veri.');
+
+            // Yalnız bu sayfaya ait alan id'leri kabul edilir
+            $gecerli = array_map(fn($r) => (int)$r['id'], array_values(alanYetkileriGetir($db, $alanSayfaId, $depId)));
+            $simdi   = date('Y-m-d H:i:s');
+            foreach ($gelen as $g) {
+                $alanId = (int)($g['id'] ?? 0);
+                if (!in_array($alanId, $gecerli, true)) continue;
+                $gor     = !empty($g['gor']) ? 1 : 0;
+                $duzenle = ($gor && !empty($g['duzenle'])) ? 1 : 0;
+                $kilitli = ($duzenle && !empty($g['kilitli_duzenle'])) ? 1 : 0;
+                $ok = $db->execute("
+                    MERGE dbo.Menu_SayfaAlanYetkileri AS t
+                    USING (SELECT ? AS Alan_id, ? AS Departman_id) AS s
+                       ON t.Menu_SayfaAlanYetkileri_Alan_id = s.Alan_id AND t.Menu_SayfaAlanYetkileri_Departman_id = s.Departman_id
+                    WHEN MATCHED THEN UPDATE SET
+                         Menu_SayfaAlanYetkileri_Gor = ?, Menu_SayfaAlanYetkileri_Duzenle = ?, Menu_SayfaAlanYetkileri_KilitliDuzenle = ?,
+                         Durum = 1, GuncelleyenKullanici = ?, GuncellemeTarihi = ?
+                    WHEN NOT MATCHED THEN INSERT
+                         (Menu_SayfaAlanYetkileri_Alan_id, Menu_SayfaAlanYetkileri_Departman_id, Menu_SayfaAlanYetkileri_Gor,
+                          Menu_SayfaAlanYetkileri_Duzenle, Menu_SayfaAlanYetkileri_KilitliDuzenle, OlusturanKullanici, OlusturmaTarihi, Durum)
+                         VALUES (s.Alan_id, s.Departman_id, ?, ?, ?, ?, ?, 1);
+                ", [$alanId, $depId, $gor, $duzenle, $kilitli, $user['kullanici_id'], $simdi,
+                    $gor, $duzenle, $kilitli, $user['kullanici_id'], $simdi]);
+                if (!$ok) throw new Exception('Alan yetkisi kaydedilemedi (alan #' . $alanId . ').');
+            }
+            echo json_encode(['success' => true, 'message' => 'Alan yetkileri kaydedildi']);
+            exit;
+        }
+
         // Süreç Kontrol — Endpoint 18 (CheckRequisitionList): gövde [TalepKayitNo] → data[0].requestStatusCode
         // HTTP 200 ve requestStatusCode gelirse: BasvuruSurecDurum_ID = requestStatusCode, BasvuruDurum_ID = 1
         if ($action === 'surec_kontrol') {
@@ -427,7 +554,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
             $kayitId = (int)($_POST['id'] ?? 0);
             if ($kayitId <= 0) throw new Exception('Süreç sorgusu yalnız kayıtlı başvuruda yapılır.');
-            if ($birimKisitli && !basvuruKayitBirimYetkiliMi($db, $izinliBirimler, $kayitId)) {
+            if (($birimKisitli && !basvuruKayitBirimYetkiliMi($db, $izinliBirimler, $kayitId))
+                || ($kendiKisitli && !basvuruKayitKendiMi($db, $kullaniciId, $kayitId))) {
                 throw new Exception('Bu kayda erişim yetkiniz yok!');
             }
 
@@ -436,6 +564,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $musteriNo    = $temiz($_POST['MusteriNo'] ?? '');
             $talepKayitNo = $temiz($_POST['TalepKayitNo'] ?? '');
             $memoId       = $temiz($_POST['MemoID'] ?? '');
+            // Alan yetkisi yoksa (departman / süreç kilidi) POST yok sayılır, kayıttaki değer kullanılır
+            $mevcutNo = $db->fetchOne("SELECT MusteriNo, TalepKayitNo, MemoID FROM Basvurular WHERE Basvurular_id = ?", [$kayitId]) ?: [];
+            if (!$alanDuzenle('MusteriNo'))    $musteriNo    = $temiz($mevcutNo['MusteriNo'] ?? '');
+            if (!$alanDuzenle('TalepKayitNo')) $talepKayitNo = $temiz($mevcutNo['TalepKayitNo'] ?? '');
+            if (!$alanDuzenle('MemoID'))       $memoId       = $temiz($mevcutNo['MemoID'] ?? '');
             if ($talepKayitNo === '') throw new Exception('Talep Kayıt No boş olamaz.');
 
             // Süreç sorgusu ortak servisten yürür: endpoint (Order/CheckRequisition),
@@ -503,7 +636,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         if ($kayitId > 0 && !$permissions['can_edit']) throw new Exception('Düzenleme yetkiniz yok!');
         if ($kayitId == 0 && !$permissions['can_add'])  throw new Exception('Ekleme yetkiniz yok!');
-        if ($kayitId > 0 && $birimKisitli && !basvuruKayitBirimYetkiliMi($db, $izinliBirimler, $kayitId)) {
+        if ($kayitId > 0 && (($birimKisitli && !basvuruKayitBirimYetkiliMi($db, $izinliBirimler, $kayitId))
+                          || ($kendiKisitli && !basvuruKayitKendiMi($db, $kullaniciId, $kayitId)))) {
             throw new Exception('Bu kayda erişim yetkiniz yok!');
         }
 
@@ -541,8 +675,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'isVeteran'             => isset($_POST['isVeteran'])     ? 1 : 0,
         ];
 
+        // Alan yetkisi: görünmeyen / düzenlenemeyen (departman veya süreç kilidi) alanlar yok sayılır → kayıttaki değer korunur
+        foreach (array_keys($data) as $alanKod) {
+            if (!$alanDuzenle($alanKod)) unset($data[$alanKod]);
+        }
+
         // TC Kimlik No: doluysa 11 haneli sayı olmalı (JS filtresi atlanırsa diye sunucuda da kontrol)
-        if ($data['TCKimlikNo'] !== null) {
+        if (($data['TCKimlikNo'] ?? null) !== null) {
             $tc = preg_replace('/\D/', '', $data['TCKimlikNo']);
             if (strlen($tc) !== 11 || $tc[0] === '0') {
                 throw new Exception('TC Kimlik No 11 haneli sayı olmalıdır.');
@@ -551,36 +690,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         // KARA LİSTE — numara (veya TC) engelliyse kayıt oluşturulmaz/güncellenmez.
+        // Yetkisi olmayan (POST'tan çıkarılan) alanlar için kayıttaki değer kullanılır.
+        $klVeri = $data;
+        if ($kayitId > 0) {
+            $klMevcut = $db->fetchOne("SELECT Isim, Soyisim, TCKimlikNo, phoneCountryNumber, phoneAreaNumber, phoneNumber FROM Basvurular WHERE Basvurular_id = ?", [$kayitId]) ?: [];
+            $klVeri   = array_merge($klMevcut, $data);
+        }
         $engel = KaraListe::kontrolVeLogla(
-            KaraListe::kayittanGsm($data),
+            KaraListe::kayittanGsm($klVeri),
             'basvuru-form:' . ($kayitId > 0 ? 'guncelle' : 'ekle'),
-            ['Isim' => $data['Isim'], 'Soyisim' => $data['Soyisim']],
+            ['Isim' => $klVeri['Isim'] ?? null, 'Soyisim' => $klVeri['Soyisim'] ?? null],
             $kayitId > 0 ? $kayitId : null,
             $user['kullanici_id'],
-            (string)($data['TCKimlikNo'] ?? '')
+            (string)($klVeri['TCKimlikNo'] ?? '')
         );
         if ($engel) {
             throw new Exception($engel['_mesaj'] . ' (kara listede)');
         }
 
-        // Sadece admin değiştirebilir: admin değilse bu alanlar yok sayılır
-        if (empty($permissions['is_admin'])) {
-            unset($data['BasvuruDurum_ID'], $data['BasvuruSurecDurum_ID'], $data['BasvuruDurumMesaj']);
-            // Müşteri No / Talep Kayıt No / Memo ID — departman 1/21/22 kaydedebilir, diğerleri yok sayılır
-            if (!in_array((int)($user['departman_id'] ?? 0), [1, 21, 22], true)) {
-                unset($data['MusteriNo'], $data['TalepKayitNo'], $data['MemoID']);
-            }
-        }
-
         // Kısıtlı kullanıcı: seçilen personel/lead/form izinli birime ait olmalı (POST manipülasyonuna karşı)
         if ($birimKisitli) {
-            if (!secimBirimYetkiliMi($db, $izinliBirimler, 'personel', (int)$data['AltBayiPersonel_ID'])) {
+            if (!secimBirimYetkiliMi($db, $izinliBirimler, 'personel', (int)($data['AltBayiPersonel_ID'] ?? 0))) {
                 throw new Exception('Seçilen alt bayi personeli için yetkiniz yok!');
             }
-            if (!secimBirimYetkiliMi($db, $izinliBirimler, 'lead', (int)$data['CallCenterApiLead_ID'])) {
+            if (!secimBirimYetkiliMi($db, $izinliBirimler, 'lead', (int)($data['CallCenterApiLead_ID'] ?? 0))) {
                 throw new Exception('Seçilen API lead için yetkiniz yok!');
             }
-            if (!secimBirimYetkiliMi($db, $izinliBirimler, 'form', (int)$data['ReklamLeadFormlari_ID'])) {
+            if (!secimBirimYetkiliMi($db, $izinliBirimler, 'form', (int)($data['ReklamLeadFormlari_ID'] ?? 0))) {
                 throw new Exception('Seçilen reklam lead formu için yetkiniz yok!');
             }
         }
@@ -590,10 +726,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             throw new Exception('Alt Bayi Personeli seçimi zorunludur.');
         }
 
-        // Alt Bayi Personeli: yalnız departman 1/21/22 elle değiştirebilir.
-        // Diğer departmanlar: atanmışsa mevcut değeri korur (POST manipülasyonuna karşı);
+        // Alt Bayi Personeli: alan yetkisi olmayan departman elle değiştiremez.
+        // Atanmışsa mevcut değer korunur (POST manipülasyonuna karşı);
         // NULL ise ve forma (kullanıcının birim kapsamında) TEK personel bağlıysa onu otomatik atar (ekranda görünen değer).
-        if (!in_array((int)($user['departman_id'] ?? 0), [1, 21, 22], true) && $kayitId > 0) {
+        if (!$alanDuzenle('AltBayiPersonel_ID') && $kayitId > 0) {
             $mevcutPer = $db->fetchOne("SELECT AltBayiPersonel_ID, ReklamLeadFormlari_ID, CallCenterApiLead_ID FROM Basvurular WHERE Basvurular_id = ?", [$kayitId]);
             $mevcutId  = isset($mevcutPer['AltBayiPersonel_ID']) ? (int)$mevcutPer['AltBayiPersonel_ID'] : 0;
 
@@ -649,7 +785,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 // =====================================================================
 $basvuru = null;
 if ($editMode) {
-    if ($birimKisitli && !basvuruKayitBirimYetkiliMi($db, $izinliBirimler, $id)) {
+    if (($birimKisitli && !basvuruKayitBirimYetkiliMi($db, $izinliBirimler, $id))
+        || ($kendiKisitli && !basvuruKayitKendiMi($db, $kullaniciId, $id))) {
         PageAuth::accessDenied('Bu kayda erişim yetkiniz yok!');
     }
     $basvuru = $db->fetchOne("SELECT * FROM Basvurular WHERE Basvurular_id = ?", [$id]);
@@ -835,16 +972,14 @@ if ($vAltBayi === '' && $editMode) {
 if ($vAltBayi === '' && count($personeller) === 1) {
     $vAltBayi = (string)$personeller[0]['id'];
 }
-$kilit   = empty($permissions['is_admin']);   // admin değilse alanlar kilitli
-$ro      = $kilit ? 'disabled' : '';
-// Alt Bayi Personeli — yeni kayıtta herkes seçebilir (zorunlu); düzenlemede yalnız departman 1, 21, 22
-$altBayiKilit = $editMode && !in_array((int)($user['departman_id'] ?? 0), [1, 21, 22], true);
-$altBayiRo    = $altBayiKilit ? 'disabled' : '';
-$kilitIco = $kilit ? ' <i class="bi bi-lock-fill text-muted small" title="Sadece admin değiştirebilir"></i>' : '';
-// Müşteri No / Talep Kayıt No / Memo ID — admin VEYA departman 1/21/22 düzenleyebilir
+// Alan görünürlük/düzenleme: $alanGor / $alanRo / $alanIco (Menu_SayfaAlanYetkileri). Yeni kayıtta Alt Bayi Personeli herkese açık.
+$altBayiKilit = !$alanDuzenle('AltBayiPersonel_ID');
+// Süreç sorgusu (Endpoint 18) — işlem yetkisi: admin VEYA departman 1/21/22
 $surecErisim = !empty($permissions['is_admin']) || in_array((int)($user['departman_id'] ?? 0), [1, 21, 22], true);
-$surecRo     = $surecErisim ? '' : 'disabled';
-$surecIco    = $surecErisim ? '' : ' <i class="bi bi-lock-fill text-muted small" title="Sadece admin veya yetkili departman değiştirebilir"></i>';
+// Sayfa Yetki modalı — departman listesi (Admin her zaman tam yetkili olduğu için listelenmez)
+$yetkiDepartmanlar = $alanAdmin
+    ? $db->fetchAll("SELECT departman_id AS id, departman_adi AS ad FROM kullanici_Departmanlar WHERE departman_durum = 1 AND departman_id <> 1 ORDER BY departman_adi")
+    : [];
 ?>
 <!DOCTYPE html>
 <html lang="tr">
@@ -871,7 +1006,14 @@ $surecIco    = $surecErisim ? '' : ' <i class="bi bi-lock-fill text-muted small"
         <div class="app-content-header">
             <div class="container-fluid">
                 <div class="row">
-                    <div class="col-sm-6"><h3 class="mb-0"><?= htmlspecialchars($pageTitle) ?></h3></div>
+                    <div class="col-sm-6 d-flex align-items-center gap-2">
+                        <h3 class="mb-0"><?= htmlspecialchars($pageTitle) ?></h3>
+                        <?php if ($alanAdmin): ?>
+                        <button type="button" class="btn btn-sm btn-outline-secondary" id="btnSayfaYetki" title="Departman bazlı alan yetkileri">
+                            <i class="bi bi-shield-lock"></i> Sayfa Yetki
+                        </button>
+                        <?php endif; ?>
+                    </div>
                     <div class="col-sm-6">
                         <ol class="breadcrumb float-sm-end">
                             <li class="breadcrumb-item"><?= htmlspecialchars($menuAdi) ?></li>
@@ -900,153 +1042,206 @@ $surecIco    = $surecErisim ? '' : ' <i class="bi bi-lock-fill text-muted small"
                         </div>
                         <div class="card-body">
                             <div class="row g-3">
+                                <?php if ($alanGor('Isim')): ?>
                                 <div class="col-md-6 col-lg-3">
-                                    <label class="form-label">İsim</label>
-                                    <input type="text" class="form-control" name="Isim" maxlength="100" value="<?= htmlspecialchars(val($basvuru, 'Isim')) ?>">
+                                    <label class="form-label">İsim<?= $alanIco('Isim') ?></label>
+                                    <input type="text" class="form-control" name="Isim" maxlength="100" value="<?= htmlspecialchars(val($basvuru, 'Isim')) ?>" <?= $alanRo('Isim') ?>>
                                 </div>
+                                <?php endif; ?>
+                                <?php if ($alanGor('Soyisim')): ?>
                                 <div class="col-md-6 col-lg-3">
-                                    <label class="form-label">Soyisim</label>
-                                    <input type="text" class="form-control" name="Soyisim" maxlength="100" value="<?= htmlspecialchars(val($basvuru, 'Soyisim')) ?>">
+                                    <label class="form-label">Soyisim<?= $alanIco('Soyisim') ?></label>
+                                    <input type="text" class="form-control" name="Soyisim" maxlength="100" value="<?= htmlspecialchars(val($basvuru, 'Soyisim')) ?>" <?= $alanRo('Soyisim') ?>>
                                 </div>
+                                <?php endif; ?>
+                                <?php if ($alanGor('TCKimlikNo')): ?>
                                 <div class="col-md-6 col-lg-3">
-                                    <label class="form-label">TC Kimlik No</label>
-                                    <input type="text" class="form-control mono" name="TCKimlikNo" id="TCKimlikNo" maxlength="11" inputmode="numeric" placeholder="11 hane" value="<?= htmlspecialchars(val($basvuru, 'TCKimlikNo')) ?>">
+                                    <label class="form-label">TC Kimlik No<?= $alanIco('TCKimlikNo') ?></label>
+                                    <input type="text" class="form-control mono" name="TCKimlikNo" id="TCKimlikNo" maxlength="11" inputmode="numeric" placeholder="11 hane" value="<?= htmlspecialchars(val($basvuru, 'TCKimlikNo')) ?>" <?= $alanRo('TCKimlikNo') ?>>
                                 </div>
+                                <?php endif; ?>
+                                <?php if ($alanGor('genderType')): ?>
                                 <div class="col-md-6 col-lg-3">
-                                    <label class="form-label">Cinsiyet</label>
-                                    <select class="form-select" name="genderType">
+                                    <label class="form-label">Cinsiyet<?= $alanIco('genderType') ?></label>
+                                    <select class="form-select" name="genderType" <?= $alanRo('genderType') ?>>
                                         <option value="">Seçiniz</option>
                                         <option value="BAY"   <?= $vGender === 'BAY' ? 'selected' : '' ?>>BAY</option>
                                         <option value="BAYAN" <?= $vGender === 'BAYAN' ? 'selected' : '' ?>>BAYAN</option>
                                     </select>
                                 </div>
+                                <?php endif; ?>
 
+                                <?php if ($alanGor('email')): ?>
                                 <div class="col-md-6 col-lg-5">
-                                    <label class="form-label">E-posta</label>
-                                    <input type="email" class="form-control" name="email" maxlength="255" value="<?= htmlspecialchars(val($basvuru, 'email')) ?>">
+                                    <label class="form-label">E-posta<?= $alanIco('email') ?></label>
+                                    <input type="email" class="form-control" name="email" maxlength="255" value="<?= htmlspecialchars(val($basvuru, 'email')) ?>" <?= $alanRo('email') ?>>
                                 </div>
+                                <?php endif; ?>
+                                <?php if ($alanGor('birthDate')): ?>
                                 <div class="col-6 col-lg-2">
-                                    <label class="form-label">Doğum Tarihi</label>
-                                    <input type="date" class="form-control" name="birthDate" value="<?= htmlspecialchars($vBirth) ?>">
+                                    <label class="form-label">Doğum Tarihi<?= $alanIco('birthDate') ?></label>
+                                    <input type="date" class="form-control" name="birthDate" value="<?= htmlspecialchars($vBirth) ?>" <?= $alanRo('birthDate') ?>>
                                 </div>
+                                <?php endif; ?>
+                                <?php if ($alanGor('phoneCountryNumber')): ?>
                                 <div class="col-4 col-md-2 col-lg-1">
-                                    <label class="form-label">Ülke</label>
-                                    <input type="text" class="form-control mono" name="phoneCountryNumber" id="phoneCountryNumber" maxlength="2" inputmode="numeric" placeholder="90" value="<?= htmlspecialchars($vUlke) ?>">
+                                    <label class="form-label">Ülke<?= $alanIco('phoneCountryNumber') ?></label>
+                                    <input type="text" class="form-control mono" name="phoneCountryNumber" id="phoneCountryNumber" maxlength="2" inputmode="numeric" placeholder="90" value="<?= htmlspecialchars($vUlke) ?>" <?= $alanRo('phoneCountryNumber') ?>>
                                 </div>
+                                <?php endif; ?>
+                                <?php if ($alanGor('phoneAreaNumber')): ?>
                                 <div class="col-4 col-md-2 col-lg-1">
-                                    <label class="form-label">Alan</label>
-                                    <input type="text" class="form-control mono" name="phoneAreaNumber" id="phoneAreaNumber" maxlength="3" inputmode="numeric" placeholder="532" value="<?= htmlspecialchars(val($basvuru, 'phoneAreaNumber')) ?>">
+                                    <label class="form-label">Alan<?= $alanIco('phoneAreaNumber') ?></label>
+                                    <input type="text" class="form-control mono" name="phoneAreaNumber" id="phoneAreaNumber" maxlength="3" inputmode="numeric" placeholder="532" value="<?= htmlspecialchars(val($basvuru, 'phoneAreaNumber')) ?>" <?= $alanRo('phoneAreaNumber') ?>>
                                 </div>
+                                <?php endif; ?>
+                                <?php if ($alanGor('phoneNumber')): ?>
                                 <div class="col-4 col-md-3 col-lg-2">
-                                    <label class="form-label">Telefon No <span id="mukerrerBadge" class="badge bg-danger d-none"></span></label>
-                                    <input type="text" class="form-control mono" name="phoneNumber" id="phoneNumber" maxlength="10" inputmode="numeric" placeholder="5550000000" value="<?= htmlspecialchars(val($basvuru, 'phoneNumber')) ?>">
+                                    <label class="form-label">Telefon No<?= $alanIco('phoneNumber') ?> <span id="mukerrerBadge" class="badge bg-danger d-none"></span></label>
+                                    <input type="text" class="form-control mono" name="phoneNumber" id="phoneNumber" maxlength="10" inputmode="numeric" placeholder="5550000000" value="<?= htmlspecialchars(val($basvuru, 'phoneNumber')) ?>" <?= $alanRo('phoneNumber') ?>>
                                 </div>
+                                <?php endif; ?>
 
+                                <?php if ($alanGor('KimlikKartiTurleri_ID')): ?>
                                 <div class="col-md-6">
-                                    <label class="form-label">Kimlik Kartı Türü</label>
-                                    <select class="form-select" name="KimlikKartiTurleri_ID">
+                                    <label class="form-label">Kimlik Kartı Türü<?= $alanIco('KimlikKartiTurleri_ID') ?></label>
+                                    <select class="form-select" name="KimlikKartiTurleri_ID" <?= $alanRo('KimlikKartiTurleri_ID') ?>>
                                         <option value="">Seçiniz</option>
                                         <?php foreach ($kimlikKartiTurleri as $k): ?>
                                         <option value="<?= (int)$k['id'] ?>" <?= (string)$vKimlik === (string)$k['id'] ? 'selected' : '' ?>><?= htmlspecialchars($k['ad']) ?> (<?= htmlspecialchars($k['kod']) ?>)</option>
                                         <?php endforeach; ?>
                                     </select>
                                 </div>
+                                <?php endif; ?>
+                                <?php if ($alanGor('ticketRoutingType')): ?>
                                 <div class="col-md-6 col-lg-3">
-                                    <label class="form-label">Talep Yönlendirme</label>
-                                    <select class="form-select" name="ticketRoutingType">
+                                    <label class="form-label">Talep Yönlendirme<?= $alanIco('ticketRoutingType') ?></label>
+                                    <select class="form-select" name="ticketRoutingType" <?= $alanRo('ticketRoutingType') ?>>
                                         <option value="0" <?= $vRouting !== '1' ? 'selected' : '' ?>>Adrese bakan bayiye</option>
                                         <option value="1" <?= $vRouting === '1' ? 'selected' : '' ?>>Bana yönlendir</option>
                                     </select>
                                 </div>
+                                <?php endif; ?>
+                                <?php if ($alanGor('isHandicapped') || $alanGor('isVeteran')): ?>
                                 <div class="col-md-6 col-lg-3">
                                     <label class="form-label">İndirim Beyanı <small class="text-muted">(belge gerekebilir)</small></label>
                                     <div class="d-flex gap-3 pt-1">
+                                        <?php if ($alanGor('isHandicapped')): ?>
                                         <div class="form-check form-switch">
-                                            <input class="form-check-input" type="checkbox" role="switch" id="isHandicapped" name="isHandicapped" value="1" <?= $vEngelli ? 'checked' : '' ?>>
-                                            <label class="form-check-label" for="isHandicapped">Engelli</label>
+                                            <input class="form-check-input" type="checkbox" role="switch" id="isHandicapped" name="isHandicapped" value="1" <?= $vEngelli ? 'checked' : '' ?> <?= $alanRo('isHandicapped') ?>>
+                                            <label class="form-check-label" for="isHandicapped">Engelli<?= $alanIco('isHandicapped') ?></label>
                                         </div>
+                                        <?php endif; ?>
+                                        <?php if ($alanGor('isVeteran')): ?>
                                         <div class="form-check form-switch">
-                                            <input class="form-check-input" type="checkbox" role="switch" id="isVeteran" name="isVeteran" value="1" <?= $vGazi ? 'checked' : '' ?>>
-                                            <label class="form-check-label" for="isVeteran">Şehit/Gazi</label>
+                                            <input class="form-check-input" type="checkbox" role="switch" id="isVeteran" name="isVeteran" value="1" <?= $vGazi ? 'checked' : '' ?> <?= $alanRo('isVeteran') ?>>
+                                            <label class="form-check-label" for="isVeteran">Şehit/Gazi<?= $alanIco('isVeteran') ?></label>
                                         </div>
+                                        <?php endif; ?>
                                     </div>
                                 </div>
+                                <?php endif; ?>
 
+                                <?php if ($alanGor('bbkAddressCode')): ?>
                                 <div class="col-md-6">
-                                    <label class="form-label">BBK Adres Kodu <small class="text-muted">(doğrulayınca şehir/kampanya belirlenir)</small></label>
+                                    <label class="form-label">BBK Adres Kodu<?= $alanIco('bbkAddressCode') ?> <small class="text-muted">(doğrulayınca şehir/kampanya belirlenir)</small></label>
                                     <div class="input-group">
-                                        <input type="text" class="form-control mono" name="bbkAddressCode" id="bbkAddressCode" maxlength="16" value="<?= htmlspecialchars(val($basvuru, 'bbkAddressCode')) ?>">
-                                        <button type="button" class="btn btn-outline-success" id="btnBbkDogrula" title="BBK kodunu doğrula ve şehri belirle"><i class="bi bi-check2-circle"></i></button>
-                                        <button type="button" class="btn btn-outline-primary" id="btnBbkModal" title="Adres seçerek üret"><i class="bi bi-geo-alt"></i></button>
+                                        <input type="text" class="form-control mono" name="bbkAddressCode" id="bbkAddressCode" maxlength="16" value="<?= htmlspecialchars(val($basvuru, 'bbkAddressCode')) ?>" <?= $alanRo('bbkAddressCode') ?>>
+                                        <button type="button" class="btn btn-outline-success" id="btnBbkDogrula" title="BBK kodunu doğrula ve şehri belirle" <?= $alanRo('bbkAddressCode') ?>><i class="bi bi-check2-circle"></i></button>
+                                        <button type="button" class="btn btn-outline-primary" id="btnBbkModal" title="Adres seçerek üret" <?= $alanRo('bbkAddressCode') ?>><i class="bi bi-geo-alt"></i></button>
                                     </div>
                                 </div>
+                                <?php endif; ?>
+                                <?php if ($alanGor('Kampanyalar_ID')): ?>
                                 <div class="col-12">
-                                    <label class="form-label">Kampanya <small class="text-muted">(şehre göre filtrelenir)</small></label>
-                                    <select class="form-select" name="Kampanyalar_ID" id="Kampanyalar_ID">
+                                    <label class="form-label">Kampanya<?= $alanIco('Kampanyalar_ID') ?> <small class="text-muted">(şehre göre filtrelenir)</small></label>
+                                    <select class="form-select" name="Kampanyalar_ID" id="Kampanyalar_ID" data-kilitli="<?= $alanDuzenle('Kampanyalar_ID') ? '0' : '1' ?>" <?= $alanRo('Kampanyalar_ID') ?>>
                                         <option value="">Seçiniz</option>
                                         <?php foreach ($kampanyalar as $k): ?>
                                         <option value="<?= (int)$k['id'] ?>" <?= (string)val($basvuru, 'Kampanyalar_ID') === (string)$k['id'] ? 'selected' : '' ?>><?= htmlspecialchars($k['ad']) ?></option>
                                         <?php endforeach; ?>
                                     </select>
                                 </div>
+                                <?php endif; ?>
 
+                                <?php if ($alanGor('Basvuru_Aciklama')): ?>
                                 <div class="col-md-9">
-                                    <label class="form-label">Açıklama</label>
-                                    <textarea class="form-control" name="Basvuru_Aciklama" rows="2" maxlength="500"><?= htmlspecialchars(val($basvuru, 'Basvuru_Aciklama')) ?></textarea>
+                                    <label class="form-label">Açıklama<?= $alanIco('Basvuru_Aciklama') ?></label>
+                                    <textarea class="form-control" name="Basvuru_Aciklama" rows="2" maxlength="500" <?= $alanRo('Basvuru_Aciklama') ?>><?= htmlspecialchars(val($basvuru, 'Basvuru_Aciklama')) ?></textarea>
                                 </div>
+                                <?php endif; ?>
+                                <?php if ($alanGor('Basvurular_IletisimDurum_ID')): ?>
                                 <div class="col-md-3">
-                                    <label class="form-label">İletişim Durumu</label>
-                                    <select class="form-select" name="Basvurular_IletisimDurum_ID">
+                                    <label class="form-label">İletişim Durumu<?= $alanIco('Basvurular_IletisimDurum_ID') ?></label>
+                                    <select class="form-select" name="Basvurular_IletisimDurum_ID" <?= $alanRo('Basvurular_IletisimDurum_ID') ?>>
                                         <option value="">Seçiniz</option>
                                         <?php foreach ($iletisimDurumlari as $idr): ?>
                                         <option value="<?= (int)$idr['id'] ?>" <?= (string)val($basvuru, 'Basvurular_IletisimDurum_ID') === (string)$idr['id'] ? 'selected' : '' ?>><?= htmlspecialchars($idr['ad']) ?></option>
                                         <?php endforeach; ?>
                                     </select>
                                 </div>
+                                <?php endif; ?>
                             </div>
                         </div>
                     </div>
 
                     <!-- Durum & İlişkilendirme -->
                     <div class="card card-secondary card-outline mb-3"<?= $kartStyle ?>>
-                        <div class="card-header"<?= $baslikStyle ?>><h3 class="card-title mb-0"><i class="bi bi-diagram-3"></i> Durum & İlişkilendirme</h3></div>
+                        <div class="card-header d-flex justify-content-between align-items-center"<?= $baslikStyle ?>>
+                            <h3 class="card-title mb-0"><i class="bi bi-diagram-3"></i> Durum & İlişkilendirme</h3>
+                            <?php if ($kayitKilitli && !$alanAdmin): ?>
+                            <span class="badge bg-success"><i class="bi bi-lock-fill"></i> Başvuru tamamlandı — bazı alanlar kilitli</span>
+                            <?php endif; ?>
+                        </div>
                         <div class="card-body">
                             <div class="row g-3">
+                                <?php if ($alanGor('BasvuruDurum_ID')): ?>
                                 <div class="col-md-4">
-                                    <label class="form-label">Başvuru Durumu<?= $kilitIco ?></label>
-                                    <select class="form-select" name="BasvuruDurum_ID" <?= $ro ?>>
+                                    <label class="form-label">Başvuru Durumu<?= $alanIco('BasvuruDurum_ID') ?></label>
+                                    <select class="form-select" name="BasvuruDurum_ID" <?= $alanRo('BasvuruDurum_ID') ?>>
                                         <option value="">Seçiniz</option>
                                         <?php foreach ($basvuruDurumlari as $d): ?>
                                         <option value="<?= (int)$d['id'] ?>" <?= (string)val($basvuru, 'BasvuruDurum_ID') === (string)$d['id'] ? 'selected' : '' ?>><?= htmlspecialchars($d['ad']) ?></option>
                                         <?php endforeach; ?>
                                     </select>
                                 </div>
+                                <?php endif; ?>
+                                <?php if ($alanGor('BasvuruSurecDurum_ID')): ?>
                                 <div class="col-md-4">
-                                    <label class="form-label">Süreç Durumu<?= $kilitIco ?></label>
-                                    <select class="form-select" name="BasvuruSurecDurum_ID" <?= $ro ?>>
+                                    <label class="form-label">Süreç Durumu<?= $alanIco('BasvuruSurecDurum_ID') ?></label>
+                                    <select class="form-select" name="BasvuruSurecDurum_ID" <?= $alanRo('BasvuruSurecDurum_ID') ?>>
                                         <option value="">Seçiniz</option>
                                         <?php foreach ($surecDurumlari as $s): ?>
                                         <option value="<?= (int)$s['id'] ?>" <?= (string)val($basvuru, 'BasvuruSurecDurum_ID') === (string)$s['id'] ? 'selected' : '' ?>><?= htmlspecialchars($s['ad']) ?></option>
                                         <?php endforeach; ?>
                                     </select>
                                 </div>
+                                <?php endif; ?>
+                                <?php if ($alanGor('BasvuruDurumMesaj')): ?>
                                 <div class="col-md-4">
-                                    <label class="form-label">Durum Mesajı<?= $kilitIco ?></label>
-                                    <input type="text" class="form-control" name="BasvuruDurumMesaj" maxlength="500" value="<?= htmlspecialchars(val($basvuru, 'BasvuruDurumMesaj')) ?>" <?= $ro ?>>
+                                    <label class="form-label">Durum Mesajı<?= $alanIco('BasvuruDurumMesaj') ?></label>
+                                    <input type="text" class="form-control" name="BasvuruDurumMesaj" maxlength="500" value="<?= htmlspecialchars(val($basvuru, 'BasvuruDurumMesaj')) ?>" <?= $alanRo('BasvuruDurumMesaj') ?>>
                                 </div>
+                                <?php endif; ?>
 
+                                <?php if ($alanGor('MusteriNo')): ?>
                                 <div class="col-md-4">
-                                    <label class="form-label">Müşteri No<?= $surecIco ?></label>
-                                    <input type="text" class="form-control mono" name="MusteriNo" id="MusteriNo" inputmode="numeric" value="<?= htmlspecialchars(val($basvuru, 'MusteriNo')) ?>" <?= $surecRo ?>>
+                                    <label class="form-label">Müşteri No<?= $alanIco('MusteriNo') ?></label>
+                                    <input type="text" class="form-control mono" name="MusteriNo" id="MusteriNo" inputmode="numeric" value="<?= htmlspecialchars(val($basvuru, 'MusteriNo')) ?>" <?= $alanRo('MusteriNo') ?>>
                                 </div>
+                                <?php endif; ?>
+                                <?php if ($alanGor('TalepKayitNo')): ?>
                                 <div class="col-md-4">
-                                    <label class="form-label">Talep Kayıt No<?= $surecIco ?></label>
-                                    <input type="text" class="form-control mono" name="TalepKayitNo" id="TalepKayitNo" inputmode="numeric" value="<?= htmlspecialchars(val($basvuru, 'TalepKayitNo')) ?>" <?= $surecRo ?>>
+                                    <label class="form-label">Talep Kayıt No<?= $alanIco('TalepKayitNo') ?></label>
+                                    <input type="text" class="form-control mono" name="TalepKayitNo" id="TalepKayitNo" inputmode="numeric" value="<?= htmlspecialchars(val($basvuru, 'TalepKayitNo')) ?>" <?= $alanRo('TalepKayitNo') ?>>
                                 </div>
+                                <?php endif; ?>
+                                <?php if ($alanGor('MemoID')): ?>
                                 <div class="col-md-4">
-                                    <label class="form-label">Memo ID<?= $surecIco ?></label>
-                                    <input type="text" class="form-control mono" name="MemoID" id="MemoID" inputmode="numeric" value="<?= htmlspecialchars(val($basvuru, 'MemoID')) ?>" <?= $surecRo ?>>
+                                    <label class="form-label">Memo ID<?= $alanIco('MemoID') ?></label>
+                                    <input type="text" class="form-control mono" name="MemoID" id="MemoID" inputmode="numeric" value="<?= htmlspecialchars(val($basvuru, 'MemoID')) ?>" <?= $alanRo('MemoID') ?>>
                                 </div>
+                                <?php endif; ?>
                                 <?php if ($editMode && $surecErisim): ?>
                                 <div class="col-12">
                                     <button type="button" class="btn btn-outline-info" id="btnSurecKontrol">
@@ -1056,36 +1251,39 @@ $surecIco    = $surecErisim ? '' : ' <i class="bi bi-lock-fill text-muted small"
                                 </div>
                                 <?php endif; ?>
 
+                                <?php if ($alanGor('AltBayiPersonel_ID')): ?>
                                 <div class="col-md-4">
-                                    <label class="form-label">Alt Bayi Personeli<?= (!$editMode && !$altBayiKilit) ? ' <span class="text-danger">*</span>' : '' ?><?= $altBayiKilit ? ' <i class="bi bi-lock-fill text-muted small" title="Bu departman değiştiremez"></i>' : '' ?></label>
-                                    <select class="form-select" name="AltBayiPersonel_ID" <?= $altBayiRo ?><?= (!$editMode && !$altBayiKilit) ? ' required' : '' ?>>
+                                    <label class="form-label">Alt Bayi Personeli<?= (!$editMode && !$altBayiKilit) ? ' <span class="text-danger">*</span>' : '' ?><?= $alanIco('AltBayiPersonel_ID') ?></label>
+                                    <select class="form-select" name="AltBayiPersonel_ID" <?= $alanRo('AltBayiPersonel_ID') ?><?= (!$editMode && !$altBayiKilit) ? ' required' : '' ?>>
                                         <option value="">Seçiniz</option>
                                         <?php foreach ($personeller as $p): ?>
                                         <option value="<?= (int)$p['id'] ?>" <?= $vAltBayi === (string)$p['id'] ? 'selected' : '' ?>><?= htmlspecialchars($p['ad']) ?></option>
                                         <?php endforeach; ?>
                                     </select>
-                                    <?php if ($altBayiKilit): ?>
-                                    <input type="hidden" name="AltBayiPersonel_ID" value="<?= htmlspecialchars($vAltBayi) ?>">
-                                    <?php endif; ?>
                                 </div>
+                                <?php endif; ?>
+                                <?php if ($alanGor('ReklamLeadFormlari_ID')): ?>
                                 <div class="col-md-4">
-                                    <label class="form-label">Reklam Lead Formu</label>
-                                    <select class="form-select" name="ReklamLeadFormlari_ID">
+                                    <label class="form-label">Reklam Lead Formu<?= $alanIco('ReklamLeadFormlari_ID') ?></label>
+                                    <select class="form-select" name="ReklamLeadFormlari_ID" <?= $alanRo('ReklamLeadFormlari_ID') ?>>
                                         <option value="">Seçiniz</option>
                                         <?php foreach ($reklamFormlari as $rf): ?>
                                         <option value="<?= (int)$rf['id'] ?>" <?= (string)val($basvuru, 'ReklamLeadFormlari_ID') === (string)$rf['id'] ? 'selected' : '' ?>><?= htmlspecialchars($rf['ad']) ?></option>
                                         <?php endforeach; ?>
                                     </select>
                                 </div>
+                                <?php endif; ?>
+                                <?php if ($alanGor('CallCenterApiLead_ID')): ?>
                                 <div class="col-md-4">
-                                    <label class="form-label">Çağrı Merkezi API Lead</label>
-                                    <select class="form-select" name="CallCenterApiLead_ID">
+                                    <label class="form-label">Çağrı Merkezi API Lead<?= $alanIco('CallCenterApiLead_ID') ?></label>
+                                    <select class="form-select" name="CallCenterApiLead_ID" <?= $alanRo('CallCenterApiLead_ID') ?>>
                                         <option value="">Seçiniz</option>
                                         <?php foreach ($leadler as $l): ?>
                                         <option value="<?= (int)$l['id'] ?>" <?= (string)val($basvuru, 'CallCenterApiLead_ID') === (string)$l['id'] ? 'selected' : '' ?>><?= htmlspecialchars($l['ad']) ?></option>
                                         <?php endforeach; ?>
                                     </select>
                                 </div>
+                                <?php endif; ?>
                             </div>
                         </div>
                     </div>
@@ -1101,6 +1299,44 @@ $surecIco    = $surecErisim ? '' : ' <i class="bi bi-lock-fill text-muted small"
 
     <?php include __DIR__ . '/../includes/footer.php'; ?>
 </div>
+
+<?php if ($alanAdmin): ?>
+<!-- Sayfa Yetki Modal — departman bazlı alan görünürlük / düzenleme -->
+<div class="modal fade" id="sayfaYetkiModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="bi bi-shield-lock"></i> Sayfa Yetki — Alan Bazlı</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="row g-2 align-items-end mb-3">
+                    <div class="col-md-5">
+                        <label class="form-label">Departman</label>
+                        <select class="form-select" id="syDepartman">
+                            <option value="">Seçiniz</option>
+                            <?php foreach ($yetkiDepartmanlar as $d): ?>
+                            <option value="<?= (int)$d['id'] ?>"><?= htmlspecialchars($d['ad']) ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+                    <div class="col-md-7">
+                        <small class="text-muted">
+                            Admin her zaman tüm alanları görür ve düzenler.
+                            <b>Tamamlandıysa Düzenler</b> kapalıysa başvuru durumu tamamlanan (TAMAM) kayıtta alan kilitlenir.
+                        </small>
+                    </div>
+                </div>
+                <div id="syAlanlar"><p class="text-muted text-center my-4">Departman seçiniz.</p></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Kapat</button>
+                <button type="button" class="btn btn-primary" id="btnSyKaydet" disabled><i class="bi bi-save"></i> Kaydet</button>
+            </div>
+        </div>
+    </div>
+</div>
+<?php endif; ?>
 
 <!-- BBK Adres Modal -->
 <div class="modal fade" id="bbkModal" tabindex="-1" aria-hidden="true">
@@ -1267,7 +1503,8 @@ $surecIco    = $surecErisim ? '' : ' <i class="bi bi-lock-fill text-muted small"
         function rebuildKampanya(html, disabled) {
             const $k = $('#Kampanyalar_ID');
             if ($k.hasClass('select2-hidden-accessible')) $k.select2('destroy');
-            $k.html(html).prop('disabled', !!disabled).select2({ theme: 'bootstrap-5', width: '100%' });
+            // Alan yetkisi kilitliyse (data-kilitli=1) yeniden yüklemede de kilitli kalır
+            $k.html(html).prop('disabled', !!disabled || $k.data('kilitli') == 1).select2({ theme: 'bootstrap-5', width: '100%' });
         }
         function kampanyalariYukle(sehirId) {
             rebuildKampanya('<option value="">Yükleniyor...</option>', true);
@@ -1303,6 +1540,89 @@ $surecIco    = $surecErisim ? '' : ' <i class="bi bi-lock-fill text-muted small"
         }
         $('select[name=ReklamLeadFormlari_ID]').on('change', formPersonelDoldur);
         formPersonelDoldur(); // sayfa açılışında (form seçili + personel boşsa)
+
+        <?php if ($alanAdmin): ?>
+        // ===== Sayfa Yetki Modal (alan bazlı departman yetkisi) =====
+        const syModalEl = document.getElementById('sayfaYetkiModal');
+        const syModal   = new bootstrap.Modal(syModalEl);
+        if ($('#syDepartman').hasClass('select2-hidden-accessible')) $('#syDepartman').select2('destroy');
+        $('#syDepartman').select2({ theme: 'bootstrap-5', width: '100%', dropdownParent: $('#sayfaYetkiModal') });
+
+        $('#btnSayfaYetki').on('click', function () { syModal.show(); });
+
+        function sySwitch(alanId, tur, checked, disabled) {
+            const idv = 'sy_' + tur + '_' + alanId;
+            return '<div class="form-check form-switch d-flex justify-content-center">'
+                 + '<input class="form-check-input sy-' + tur + '" type="checkbox" role="switch" id="' + idv + '"'
+                 + ' data-alan="' + alanId + '"' + (checked ? ' checked' : '') + (disabled ? ' disabled' : '') + '>'
+                 + '<label class="form-check-label" for="' + idv + '"></label></div>';
+        }
+
+        // Görür kapalıysa Düzenler, Düzenler kapalıysa Tamamlandıysa Düzenler pasif
+        function syBagimlilik($satir) {
+            const gor = $satir.find('.sy-gor').prop('checked');
+            const $d  = $satir.find('.sy-duzenle').prop('disabled', !gor);
+            if (!gor) $d.prop('checked', false);
+            const duz = $d.prop('checked');
+            const $k  = $satir.find('.sy-kilitli').prop('disabled', !duz);
+            if (!duz) $k.prop('checked', false);
+        }
+
+        function syYukle() {
+            const dep = $('#syDepartman').val();
+            $('#btnSyKaydet').prop('disabled', true);
+            if (!dep) { $('#syAlanlar').html('<p class="text-muted text-center my-4">Departman seçiniz.</p>'); return; }
+            $('#syAlanlar').html('<p class="text-center my-4"><span class="spinner-border spinner-border-sm"></span> Yükleniyor...</p>');
+            $.post('', { action: 'alan_yetki_getir', departman_id: dep }, function (r) {
+                if (!r.success) { showError('Hata', r.message || 'Yetkiler alınamadı'); return; }
+                const bolumler = {};
+                r.data.forEach(function (a) { (bolumler[a.bolum] = bolumler[a.bolum] || []).push(a); });
+                let html = '';
+                Object.keys(bolumler).forEach(function (b) {
+                    html += '<div class="card mb-3"><div class="card-header py-2"><b>' + escapeHtml(b) + '</b></div>'
+                          + '<div class="card-body p-0"><table class="table table-sm table-hover align-middle mb-0">'
+                          + '<thead><tr><th>Alan</th><th class="text-center" style="width:120px">Görür</th>'
+                          + '<th class="text-center" style="width:120px">Düzenler</th>'
+                          + '<th class="text-center" style="width:190px">Tamamlandıysa Düzenler</th></tr></thead><tbody>';
+                    bolumler[b].forEach(function (a) {
+                        const gor = a.gor == 1, duz = gor && a.duzenle == 1, kil = duz && a.kilitli_duzenle == 1;
+                        html += '<tr data-alan="' + a.id + '"><td>' + escapeHtml(a.etiket) + ' <small class="text-muted mono">' + escapeHtml(a.kod) + '</small></td>'
+                              + '<td>' + sySwitch(a.id, 'gor', gor, false) + '</td>'
+                              + '<td>' + sySwitch(a.id, 'duzenle', duz, !gor) + '</td>'
+                              + '<td>' + sySwitch(a.id, 'kilitli', kil, !duz) + '</td></tr>';
+                    });
+                    html += '</tbody></table></div></div>';
+                });
+                $('#syAlanlar').html(html || '<p class="text-muted text-center my-4">Bu sayfa için alan tanımı yok.</p>');
+                $('#btnSyKaydet').prop('disabled', !html);
+            }, 'json').fail(function () { showError('Bağlantı Hatası', 'Yetkiler alınamadı'); });
+        }
+
+        $('#syDepartman').on('change', syYukle);
+        $('#syAlanlar').on('change', '.form-check-input', function () { syBagimlilik($(this).closest('tr')); });
+
+        $('#btnSyKaydet').on('click', function () {
+            const dep = $('#syDepartman').val();
+            if (!dep) return;
+            const yetkiler = [];
+            $('#syAlanlar tr[data-alan]').each(function () {
+                const $t = $(this);
+                yetkiler.push({
+                    id: $t.data('alan'),
+                    gor: $t.find('.sy-gor').prop('checked') ? 1 : 0,
+                    duzenle: $t.find('.sy-duzenle').prop('checked') ? 1 : 0,
+                    kilitli_duzenle: $t.find('.sy-kilitli').prop('checked') ? 1 : 0
+                });
+            });
+            const $b = $(this); const eski = $b.html();
+            $b.prop('disabled', true).html('<span class="spinner-border spinner-border-sm"></span> Kaydediliyor...');
+            $.post('', { action: 'alan_yetki_kaydet', departman_id: dep, yetkiler: JSON.stringify(yetkiler) }, function (r) {
+                if (r.success) showSuccess('Kaydedildi', r.message);
+                else showError('Hata', r.message || 'Kaydedilemedi');
+            }, 'json').fail(function () { showError('Bağlantı Hatası', 'Yetkiler kaydedilemedi'); })
+              .always(function () { $b.prop('disabled', false).html(eski); });
+        });
+        <?php endif; ?>
 
         // ===== BBK Adres Modal =====
         const bbkModal = new bootstrap.Modal(document.getElementById('bbkModal'));
