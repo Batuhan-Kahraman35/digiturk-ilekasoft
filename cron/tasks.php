@@ -4888,6 +4888,121 @@ function gorevKurulumBayiRandevuBildir(array $params, $db): array
 }
 
 /**
+ * Seçilen günde kesin iptal olan (Satış Durumu "İptal ...") IRIS taleplerini
+ * il + paket filtresiyle listeleyip WhatsApp numara/grubuna düz metin gönderir.
+ * Gün bazı memo kapanış tarihidir; talep başına tek satır (TalepId).
+ *
+ * Parametreler:
+ *   iller        : IrisRapor_Il değerleri, virgüllü (ör. İZMİR); "*" = tüm iller
+ *   paket_filtre : Paket adında aranacak ifadeler, virgüllü (ör. DSL,FIBER); boş = tüm paketler
+ *   alicilar     : Telefon (905xx) ve/veya grup JID (120363...@g.us), virgüllü
+ *   gun          : Göreli gün (0 = bugün, 1 = dün)
+ *   bos_gonder   : "1" ise iptal yokken de bilgi mesajı gider
+ *   saat_bas / saat_bitis : Mesai aralığı (0-23, bitiş saati dahil); dışında gönderim atlanır
+ */
+function gorevIrisIptalBildir(array $params, $db): array
+{
+    ob_start();
+    $sonuc = ''; $durum = 1;
+
+    try {
+        $saatBas     = isset($params['saat_bas'])   && $params['saat_bas']   !== '' ? (int)$params['saat_bas']   : 0;
+        $saatBitis   = isset($params['saat_bitis']) && $params['saat_bitis'] !== '' ? (int)$params['saat_bitis'] : 23;
+        $simdikiSaat = (int)date('G');
+        if ($simdikiSaat < $saatBas || $simdikiSaat > $saatBitis) {
+            echo "  Saat {$simdikiSaat}:xx → mesai dışında ({$saatBas}-{$saatBitis}), atlandı.\n";
+            return ['durum' => 1, 'sonuc' => "Mesai saati dışında ({$simdikiSaat}:xx), gönderim atlandı.", 'cikti' => ob_get_clean()];
+        }
+
+        require_once __DIR__ . '/../admin/includes/EntegrasyonHelper.php';
+
+        $liste    = fn(string $k) => array_values(array_unique(array_filter(array_map('trim', explode(',', (string)($params[$k] ?? ''))))));
+        $iller    = $liste('iller');
+        $paketler = $liste('paket_filtre');
+        $alicilar = $liste('alicilar');
+        if (!$iller)    return ['durum' => 2, 'sonuc' => 'İl seçilmemiş.',     'cikti' => ob_get_clean()];
+        if (!$alicilar) return ['durum' => 2, 'sonuc' => 'Alıcı listesi boş.', 'cikti' => ob_get_clean()];
+
+        $gun = max(0, (int)($params['gun'] ?? 1));
+        $tarih = date('Y-m-d', strtotime("-{$gun} day"));
+        $gunAdlari = [0 => 'Bugün', 1 => 'Dün'];
+        $baslik = date('d.m.Y', strtotime($tarih)) . (isset($gunAdlari[$gun]) ? " ({$gunAdlari[$gun]})" : '');
+
+        $kosul = "r.IrisRapor_SatisDurumu LIKE N'İptal%'
+              AND r.IrisRapor_MemoKapanisTarihi >= ?
+              AND r.IrisRapor_MemoKapanisTarihi <  DATEADD(DAY, 1, CAST(? AS DATE))";
+        $sqlParams = [$tarih . ' 00:00:00', $tarih];
+
+        $tumIller = in_array('*', $iller, true);
+        if (!$tumIller) {
+            $kosul    .= ' AND r.IrisRapor_Il IN (' . implode(',', array_fill(0, count($iller), '?')) . ')';
+            $sqlParams = array_merge($sqlParams, $iller);
+        }
+        if ($paketler) {
+            $kosul    .= ' AND (' . implode(' OR ', array_fill(0, count($paketler), 'r.IrisRapor_Paket LIKE ?')) . ')';
+            $sqlParams = array_merge($sqlParams, array_map(fn($p) => '%' . $p . '%', $paketler));
+        }
+        $ilMetin    = $tumIller ? 'Tüm iller' : implode(', ', $iller);
+        $paketMetin = $paketler ? implode('/', $paketler) : 'Tüm paketler';
+        echo "  Gün: {$baslik} · İl: {$ilMetin} · Paket: {$paketMetin}\n";
+
+        // Talep başına tek satır (ISP + Neo talepleri birden çok memo satırı taşıyabilir)
+        $rows = $db->fetchAll("
+            WITH t AS (
+                SELECT r.IrisRapor_TalepId AS TalepId, r.IrisRapor_UyeAd AS Ad, r.IrisRapor_UyeSoyad AS Soyad,
+                       r.IrisRapor_Telefon AS Telefon, r.IrisRapor_Il AS Il, r.IrisRapor_Ilce AS Ilce,
+                       r.IrisRapor_Paket AS Paket, r.IrisRapor_SatisDurumu AS SatisDurumu,
+                       r.IrisRapor_MemoKapanisTarihi AS Kapanis,
+                       ROW_NUMBER() OVER (PARTITION BY r.IrisRapor_TalepId ORDER BY r.IrisRapor_MemoKapanisTarihi DESC, r.IrisRapor_Id DESC) AS sira
+                FROM DigiturkIrisRapor r
+                WHERE $kosul
+            )
+            SELECT TalepId, Ad, Soyad, Telefon, Il, Ilce, Paket, SatisDurumu, Kapanis
+            FROM t WHERE sira = 1
+            ORDER BY Il, Ilce, Kapanis", $sqlParams);
+        echo '  Bulunan iptal: ' . count($rows) . "\n";
+
+        if (!$rows && ($params['bos_gonder'] ?? '0') !== '1') {
+            return ['durum' => 1, 'sonuc' => "{$baslik}: iptal yok, gönderim yapılmadı.", 'cikti' => ob_get_clean()];
+        }
+
+        $mesaj = "❌ *İptal Başvurular ({$paketMetin}) — {$baslik}*\n"
+               . "İl: {$ilMetin} · Toplam: *" . count($rows) . "*";
+        if (!$rows) {
+            $mesaj .= "\n\nBu gün kesinleşen iptal yok.";
+        }
+        foreach ($rows as $i => $r) {
+            // "PTS_YLN_VDSL_35E-..." → "VDSL 35 Mbps"
+            $paket = preg_match('/(FIBER|VDSL\+?|ADSL)_?(\d+)/i', (string)$r['Paket'], $m)
+                ? strtoupper($m[1]) . ' ' . $m[2] . ' Mbps'
+                : trim((string)$r['Paket']);
+            $yer = trim(($r['Il'] ?? '') . ($r['Ilce'] ? ' / ' . $r['Ilce'] : ''));
+            $tel = (string)$r['Telefon'];
+            if (preg_match('/^5\d{9}$/', $tel)) $tel = '0' . $tel;   // rapor 10 hane tutuyor
+            $mesaj .= "\n\n" . ($i + 1) . '. *' . trim($r['Ad'] . ' ' . $r['Soyad']) . "*\n"
+                    . '📞 ' . ($tel ?: '-') . ' · 📍 ' . ($yer ?: '-') . "\n"
+                    . '📦 ' . ($paket ?: '-') . ' · ' . $r['SatisDurumu'];
+        }
+
+        $basarili = $hatali = 0;
+        foreach ($alicilar as $alici) {
+            $g = EntegrasyonHelper::whatsappGonder(1, $alici, $mesaj);
+            if ($g['success']) { $basarili++; echo "  ✓ {$alici}: gönderildi\n"; }
+            else               { $hatali++;   echo "  ✗ {$alici}: {$g['message']}\n"; }
+        }
+
+        $sonuc = "{$baslik}: " . count($rows) . " iptal, {$basarili} alıcıya gönderildi" . ($hatali ? ", {$hatali} hata" : '') . '.';
+        $durum = ($hatali > 0 && $basarili === 0) ? 2 : 1;
+
+    } catch (Throwable $e) {
+        $sonuc = get_class($e) . ': ' . $e->getMessage();
+        $durum = 2;
+    }
+
+    return ['durum' => $durum, 'sonuc' => $sonuc, 'cikti' => ob_get_clean()];
+}
+
+/**
  * Birleşik VoIP görevi: islem parametresine göre hesap / harcama / bakiye işlemini çalıştırır.
  * Her işlem ayrı zamanlayıcıyla (SabitParametreler.islem) tetiklenir.
  */
@@ -5165,6 +5280,7 @@ function gorevCalistir(string $gorevKodu, array $params, $db): array
         'meta_kisitlama_izle'       => gorevMetaKisitlamaIzle($params, $db),
         'meta_eksik_lead'           => gorevMetaEksikLead($params, $db),
         'meta_lead_saglik'          => gorevMetaLeadSaglik($params, $db),
+        'iris_iptal_bildir'         => gorevIrisIptalBildir($params, $db),
         default                     => throw new RuntimeException("Bilinmeyen görev kodu: {$gorevKodu}"),
     };
 }

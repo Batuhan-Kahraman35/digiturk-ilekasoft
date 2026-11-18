@@ -347,7 +347,7 @@ class MetaLeadIsle
         return match ($kod) {
             'OKUMA_YOK' => "Lead'ler hiçbir token ile okunamıyor; yeni lead'ler panele DÜŞMÜYOR.\n"
                          . "Yapılacak: Reklam Yönetimi → Facebook Sayfaları → Meta Bağlan (OAuth) ile sayfa token'ı yenilenmeli, "
-                         . "sayfa ILEKA sistem kullanıcısına atanmalı ve İşletme Ayarları → Potansiyel Müşteri Bilgileri Erişimi kontrol edilmeli.",
+                         . "sayfa ORNEK sistem kullanıcısına atanmalı ve İşletme Ayarları → Potansiyel Müşteri Bilgileri Erişimi kontrol edilmeli.",
             'EKSIK'     => count($s['eksik']) . " lead Meta'da var ama panelde yok (webhook ve eksik lead cron'u almamış).\n"
                          . "Yapılacak: Reklam Yönetimi → ilgili form → Eksik lead çek; sonra kök neden (token/abonelik) incelenmeli.",
             'KISIT'     => "Sayfa token'ı lead verisini okuyamıyor (Potansiyel Müşteri Erişimi kısıtı). Lead'ler şu an System User token'ı ile "
