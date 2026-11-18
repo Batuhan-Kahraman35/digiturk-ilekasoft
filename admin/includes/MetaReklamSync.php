@@ -40,22 +40,27 @@ class MetaReklamSync
         return hash_hmac('sha256', $token, $secret);
     }
 
-    /** Tek Graph GET çağrısı. */
+    /** Tek Graph GET çağrısı; geçici ağ hatasında 2 kez yeniden dener. */
     private static function get(string $url): array
     {
-        $ch = curl_init($url);
-        curl_setopt_array($ch, [
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_TIMEOUT        => 60,
-            CURLOPT_SSL_VERIFYPEER => false,
-        ]);
-        $cevap = curl_exec($ch);
-        $kod   = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $hata  = curl_error($ch);
-        unset($ch);
+        for ($deneme = 1; $deneme <= 3; $deneme++) {
+            $ch = curl_init($url);
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_TIMEOUT        => 60,
+                CURLOPT_SSL_VERIFYPEER => false,
+            ]);
+            $cevap = curl_exec($ch);
+            $kod   = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $hata  = curl_error($ch);
+            unset($ch);
 
-        $json = json_decode($cevap, true) ?: [];
-        return ['ok' => ($kod >= 200 && $kod < 300 && !$hata), 'data' => $json, 'kod' => $kod, 'hata' => $hata];
+            $json = json_decode((string)$cevap, true) ?: [];
+            $ok   = ($kod >= 200 && $kod < 300 && !$hata);
+            if ($ok || ($kod >= 400 && $kod < 500)) break; // 4xx kalıcı: tekrar deneme
+            if ($deneme < 3) sleep(2 * $deneme);
+        }
+        return ['ok' => $ok, 'data' => $json, 'kod' => $kod, 'hata' => $hata, 'deneme' => min($deneme, 3)];
     }
 
     /** Sayfalı (paging.next) sonucu tümüyle toplar. */
@@ -70,7 +75,9 @@ class MetaReklamSync
         while ($url && $guvenlik < 50) {
             $r = self::get($url);
             if (!$r['ok']) {
-                throw new Exception($r['data']['error']['message'] ?? ('HTTP ' . $r['kod']));
+                $mesaj = $r['data']['error']['message']
+                      ?? trim('HTTP ' . $r['kod'] . ($r['hata'] ? ' - cURL: ' . $r['hata'] : ''));
+                throw new Exception($mesaj . " ({$r['deneme']} deneme)");
             }
             foreach (($r['data']['data'] ?? []) as $satir) $tum[] = $satir;
             $url = $r['data']['paging']['next'] ?? null;
