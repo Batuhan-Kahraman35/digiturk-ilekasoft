@@ -2078,6 +2078,208 @@ function gorevMetaEksikLead(array $params, $db): array
     return ['durum' => $durum, 'sonuc' => $sonuc, 'cikti' => ob_get_clean()];
 }
 
+/** Sağlık sonucunun talep/yanıt metni. */
+function metaLeadSaglikMetin(array $s, string $ilk, string $simdi): string
+{
+    $m = "Sayfa: {$s['sayfa']['ad']} ({$s['sayfa']['ext']})\nİlk tespit: {$ilk}\nKontrol: {$simdi}\n\n";
+    foreach ($s['kodlar'] as $kod) $m .= "■ {$kod}\n" . MetaLeadIsle::saglikTalimat($kod, $s) . "\n\n";
+
+    $m .= "Form bazında lead okuma (son pencere):\n";
+    foreach ($s['formlar'] as $f) {
+        $p = [];
+        foreach ($f['sonuc'] as $tur => $r) $p[] = $tur . '=' . ($r['ok'] ? $r['adet'] . (!empty($r['fazla']) ? '+' : '') . ' lead' : 'HATA ' . mb_substr((string)$r['hata'], 0, 80));
+        $m .= "- {$f['ad']} ({$f['fid']}): {$f['durum']} | " . implode(', ', $p) . "\n";
+    }
+    if ($s['eksik']) {
+        $m .= "\nPanelde olmayan lead'ler:\n";
+        foreach (array_slice($s['eksik'], 0, 20) as $e) $m .= "- {$e['id']} | {$e['tarih']} | {$e['form']}\n";
+        if (count($s['eksik']) > 20) $m .= '... toplam ' . count($s['eksik']) . "\n";
+    }
+    return $m . "\nOtomatik Meta lead sağlık kontrolü (meta_lead_saglik) tarafından gönderilmiştir.";
+}
+
+/**
+ * Meta lead akış sağlığı: son günlerde lead almış sayfaların lead okuma (Page Token + System User),
+ * webhook aboneliği ve panele düşmeyen lead durumunu kontrol eder (MetaLeadIsle::leadSaglik).
+ * Sorun ardışık esik_tur tur sürerse destek talebi açar, sürdükçe tekrar_saat'te bir hatırlatır,
+ * sorun türü değişince ya da düzelince talebe yazar. Durum EntegrasyonLoglari'nda (Tip='meta_lead_saglik',
+ * Alici=SayfaID) tutulur. Açık GRAPH kısıtlama olayı olan sayfa atlanır (meta_kisitlama_izle bildiriyor).
+ *
+ * params: kullanici_id (zorunlu), kategori_id, oncelik_id, esik_tur (2), tekrar_saat (6),
+ *         aktif_gun (14), saat (24), eksik_dk (240), sayfa (tek SayfaID), dry (1 = talep/log yok)
+ */
+function gorevMetaLeadSaglik(array $params, $db): array
+{
+    ob_start();
+    set_time_limit(900);
+
+    $isDry = !empty($params['dry']);
+    $L = function (string $m) use ($isDry) { echo '[' . date('H:i:s') . '] ' . ($isDry ? '[DRY] ' : '') . $m . PHP_EOL; };
+
+    try {
+        require_once dirname(__DIR__) . '/admin/includes/MetaLeadIsle.php';
+        require_once dirname(__DIR__) . '/admin/includes/DestekHelper.php';
+
+        $kullaniciId = (int)($params['kullanici_id'] ?? 0);
+        $kategoriId  = (int)($params['kategori_id'] ?? 0);
+        $oncelikId   = (int)($params['oncelik_id'] ?? 0);
+        $esikTur     = max(1, (int)($params['esik_tur'] ?? 2));
+        $tekrarSaat  = max(1, (int)($params['tekrar_saat'] ?? 6));
+        $aktifGun    = max(1, (int)($params['aktif_gun'] ?? 14));
+        $kontrol     = ['saat' => (int)($params['saat'] ?? 24), 'eksikDk' => (int)($params['eksik_dk'] ?? 240)];
+        if ($kullaniciId <= 0) throw new RuntimeException('kullanici_id parametresi zorunlu (destek talebini açacak personel).');
+
+        $destekAktif = DestekHelper::aktifMi() && DestekHelper::kullaniciAta($kullaniciId);
+        if (!$destekAktif) $L('UYARI: Destek API kullanılamıyor — talep açılamayacak, yalnız durum loglanacak.');
+
+        $kanalId = (int)(MetaLeadIsle::configListesi($db)[0]['KanalId'] ?? 0);
+
+        $tekSayfa = trim((string)($params['sayfa'] ?? ''));
+        $sayfalar = $db->fetchAll("
+            SELECT s.ReklamFacebookSayfalari_SayfaID AS ext, s.ReklamFacebookSayfalari_SayfaAdi AS ad,
+                   CASE WHEN EXISTS (
+                       SELECT 1 FROM MetaKisitlamaOlaylari o
+                       INNER JOIN tanim_MetaOlayDurumlari d ON d.tanim_MetaOlayDurumlari_id = o.MetaKisitlamaOlaylari_OlayDurumu_id
+                       WHERE o.MetaKisitlamaOlaylari_FacebookSayfa_id = s.ReklamFacebookSayfalari_id
+                         AND o.Durum = 1 AND d.tanim_MetaOlayDurumlari_Kapanis = 0
+                         AND o.MetaKisitlamaOlaylari_MetaKodu LIKE 'GRAPH%'
+                   ) THEN 1 ELSE 0 END AS kisitli
+            FROM ReklamFacebookSayfalari s
+            WHERE s.Durum = 1 AND s.ReklamFacebookSayfalari_SayfaID NOT LIKE '%[^0-9]%' AND s.ReklamFacebookSayfalari_SayfaID <> ''
+              AND (? <> '' AND s.ReklamFacebookSayfalari_SayfaID = ? OR ? = '' AND EXISTS (
+                    SELECT 1 FROM ReklamLeadFormlari f
+                    INNER JOIN Basvurular b ON b.ReklamLeadFormlari_ID = f.ReklamLeadFormlari_id
+                    WHERE f.ReklamLeadFormlari_Sayfa_id = s.ReklamFacebookSayfalari_id
+                      AND b.Basvurular_LeadgenID IS NOT NULL AND b.OlusturmaTarihi >= DATEADD(DAY, -?, GETDATE())))
+            ORDER BY s.ReklamFacebookSayfalari_id
+        ", [$tekSayfa, $tekSayfa, $tekSayfa, $aktifGun]) ?: [];
+
+        $L(count($sayfalar) . " sayfa kontrol edilecek (son {$aktifGun} günde lead almış).");
+
+        $sonDurum = function (string $ext) use ($db, $kanalId): ?array {
+            $r = $db->fetchOne("
+                SELECT TOP 1 EntegrasyonLoglari_IstekVerisi AS v FROM EntegrasyonLoglari
+                WHERE EntegrasyonLoglari_Kanal_id = ? AND EntegrasyonLoglari_Tip = 'meta_lead_saglik' AND EntegrasyonLoglari_Alici = ?
+                ORDER BY EntegrasyonLoglari_id DESC
+            ", [$kanalId, $ext]);
+            $v = $r ? json_decode((string)$r['v'], true) : null;
+            return is_array($v) ? $v : null;
+        };
+        $durumYaz = function (string $ext, string $konu, ?string $hata, array $veri) use ($db, $kanalId, $kullaniciId) {
+            $simdi = date('Y-m-d H:i:s');
+            $db->insert('EntegrasyonLoglari', [
+                'EntegrasyonLoglari_Kanal_id'       => $kanalId,
+                'EntegrasyonLoglari_Tip'            => 'meta_lead_saglik',
+                'EntegrasyonLoglari_Alici'          => $ext,
+                'EntegrasyonLoglari_Konu'           => mb_substr($konu, 0, 250),
+                'EntegrasyonLoglari_Mesaj'          => null,
+                'EntegrasyonLoglari_GonderimDurumu' => $hata === null ? 'basarili' : 'hata',
+                'EntegrasyonLoglari_HataMesaj'      => $hata,
+                'EntegrasyonLoglari_IstekVerisi'    => json_encode($veri, JSON_UNESCAPED_UNICODE),
+                'EntegrasyonLoglari_CevapVerisi'    => null,
+                'EntegrasyonLoglari_GonderimTarihi' => $simdi,
+                'OlusturanKullanici'                => $kullaniciId,
+                'OlusturmaTarihi'                   => $simdi,
+                'Durum'                             => 1,
+            ]);
+        };
+
+        $say = ['saglikli' => 0, 'sorunlu' => 0, 'atlanan' => 0, 'acilan' => 0, 'yanit' => 0, 'duzelen' => 0];
+        foreach ($sayfalar as $sp) {
+            $ext = (string)$sp['ext'];
+            if ((int)$sp['kisitli'] === 1) { $say['atlanan']++; $L("- {$sp['ad']} ($ext): açık Meta kısıtlama olayı var, atlandı."); continue; }
+
+            $s     = MetaLeadIsle::leadSaglik($db, $ext, $kontrol);
+            $kod   = $s['kodlar'][0] ?? null;
+            $simdi = date('Y-m-d H:i:s');
+            $once  = $sonDurum($ext);
+            $onceKod = $once['kod'] ?? null;
+            $ticket  = (int)($once['ticket_id'] ?? 0);
+            $L("- {$s['sayfa']['ad']} ($ext): " . ($kod ? implode(', ', $s['kodlar']) : 'sağlıklı')
+               . ' | ' . count($s['formlar']) . ' form, abonelik=' . json_encode($s['abonelik']) . ', eksik=' . count($s['eksik']));
+
+            // ── Sağlıklı ─────────────────────────────────────────────────────
+            if ($kod === null) {
+                $say['saglikli']++;
+                if ($onceKod === null) continue;
+                $say['duzelen']++;
+                $L("  ✓ Düzeldi (önceki: $onceKod, ilk tespit: " . ($once['ilk'] ?? '-') . ').');
+                if ($ticket > 0 && $destekAktif && !$isDry) {
+                    $r = DestekHelper::yanitla($ticket, "Sorun giderildi: {$s['sayfa']['ad']} ({$ext}) lead akışı tekrar sağlıklı.\n\n"
+                        . "Önceki durum: {$onceKod}\nİlk tespit: " . ($once['ilk'] ?? '-') . "\nDüzelme: {$simdi}\n\n"
+                        . 'Otomatik Meta lead sağlık kontrolü (meta_lead_saglik) tarafından gönderilmiştir.');
+                    $L(($r['success'] ?? false) ? "  ✓ Talep #{$ticket} bilgilendirildi." : '  ✗ Talep yanıtlanamadı: ' . ($r['message'] ?? '?'));
+                }
+                if (!$isDry) $durumYaz($ext, 'Lead akışı sağlıklı', null, ['kod' => null, 'ilk' => null, 'tur' => 0, 'ticket_id' => null, 'son_bildirim' => null, 'son_kontrol' => $simdi]);
+                continue;
+            }
+
+            // ── Sorunlu ──────────────────────────────────────────────────────
+            $say['sorunlu']++;
+            $ilk    = $onceKod ? ($once['ilk'] ?? $simdi) : $simdi;
+            $tur    = $onceKod ? (int)($once['tur'] ?? 0) + 1 : 1;
+            $sonBil = $onceKod ? ($once['son_bildirim'] ?? null) : null;
+            $gecen  = $sonBil ? (strtotime($simdi) - strtotime($sonBil)) / 3600 : PHP_INT_MAX;
+            $metin  = metaLeadSaglikMetin($s, $ilk, $simdi);
+
+            if ($ticket <= 0) {
+                if ($tur < $esikTur) {
+                    $L("  … {$tur}. tur, talep için {$esikTur} tur bekleniyor.");
+                } elseif ($gecen < $tekrarSaat) {
+                    $L('  … Önceki talep denemesinin sonucu belirsiz; yeniden deneme ' . round($tekrarSaat - $gecen, 1) . ' saat sonra.');
+                } elseif (!$destekAktif) {
+                    $L('  ✗ Destek API kullanılamıyor, talep açılamadı.');
+                } elseif ($isDry) {
+                    $L("  [ATLANDI] Destek talebi açılacaktı: Meta lead sorunu — {$s['sayfa']['ad']} ($kod)");
+                    echo preg_replace('/^/m', '      ', $metin) . PHP_EOL;
+                } else {
+                    $r = DestekHelper::olustur("Meta lead sorunu — {$s['sayfa']['ad']} ({$kod})", $metin, $kategoriId, $oncelikId);
+                    $sonBil = $simdi;   // başarısız yanıtta da: talep karşıda açılmış olabilir, her turda yeni talep açılmasın
+                    if ($r['success'] ?? false) {
+                        $ticket = (int)($r['data']['ticket_id'] ?? 0);
+                        $say['acilan']++;
+                        $L("  ✓ Destek talebi açıldı: #{$ticket}");
+                    } else {
+                        $L('  ✗ Talep yanıtı hatalı: ' . ($r['message'] ?? '?') . " — {$tekrarSaat} saat sonra tekrar denenecek.");
+                    }
+                }
+            } elseif ($kod !== $onceKod || $gecen >= $tekrarSaat) {
+                $neden = $kod !== $onceKod ? "Sorun türü değişti ({$onceKod} → {$kod})." : 'Sorun sürüyor.';
+                if (!$destekAktif) {
+                    $L('  ✗ Destek API kullanılamıyor, talebe yazılamadı.');
+                } elseif ($isDry) {
+                    $L("  [ATLANDI] Talep #{$ticket} için yanıt yazılacaktı: $neden");
+                } else {
+                    $r = DestekHelper::yanitla($ticket, "{$neden}\n\n" . $metin);
+                    if ($r['success'] ?? false) { $sonBil = $simdi; $say['yanit']++; $L("  ✓ Talep #{$ticket}: $neden"); }
+                    else $L('  ✗ Talebe yazılamadı: ' . ($r['message'] ?? '?'));
+                }
+            } else {
+                $L("  … Talep #{$ticket} açık; sonraki hatırlatma " . round($tekrarSaat - $gecen, 1) . ' saat sonra.');
+            }
+
+            if (!$isDry) {
+                $durumYaz($ext, 'Lead sorunu: ' . implode(', ', $s['kodlar']), implode(', ', $s['kodlar']), [
+                    'kod' => $kod, 'kodlar' => $s['kodlar'], 'ilk' => $ilk, 'tur' => $tur,
+                    'ticket_id' => $ticket ?: null, 'son_bildirim' => $sonBil, 'son_kontrol' => $simdi, 'eksik' => count($s['eksik']),
+                ]);
+            }
+        }
+
+        $sonuc = sprintf('%d sayfa: %d sağlıklı, %d sorunlu%s%s%s%s.', count($sayfalar), $say['saglikli'], $say['sorunlu'],
+            $say['atlanan'] ? ", {$say['atlanan']} kısıtlı atlandı" : '',
+            $say['acilan'] ? ", {$say['acilan']} talep açıldı" : '',
+            $say['yanit'] ? ", {$say['yanit']} talebe yazıldı" : '',
+            $say['duzelen'] ? ", {$say['duzelen']} düzeldi" : '');
+        $durum = 1;
+    } catch (Throwable $e) {
+        $sonuc = get_class($e) . ': ' . $e->getMessage();
+        $durum = 2;
+    }
+
+    return ['durum' => $durum, 'sonuc' => ($isDry ? '[DRY] ' : '') . $sonuc, 'cikti' => ob_get_clean()];
+}
+
 function gorevMetaGunlukHarcamaOdeme(array $params, $db): array
 {
     ob_start();
@@ -4962,6 +5164,7 @@ function gorevCalistir(string $gorevKodu, array $params, $db): array
         'kurulum_bayi_randevu_bildir' => gorevKurulumBayiRandevuBildir($params, $db),
         'meta_kisitlama_izle'       => gorevMetaKisitlamaIzle($params, $db),
         'meta_eksik_lead'           => gorevMetaEksikLead($params, $db),
+        'meta_lead_saglik'          => gorevMetaLeadSaglik($params, $db),
         default                     => throw new RuntimeException("Bilinmeyen görev kodu: {$gorevKodu}"),
     };
 }

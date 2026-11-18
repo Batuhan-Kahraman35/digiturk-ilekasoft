@@ -1523,7 +1523,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
 
                 // Facebook sayfası testi
-                $pg = $pgFormlar = $pgFormBulundu = $pgSubs = null; $pgLeadgenAbone = false; $pgToken = null; $subYapildi = null;
+                $pg = $pgFormlar = $pgFormBulundu = $pgSubs = $pgSaglik = null; $pgLeadgenAbone = false; $pgToken = null; $subYapildi = null;
                 if ($pageIdT !== '') {
                     $pg = mtGraphGet($baseURL . '/' . $pageIdT . '?fields=id,name,access_token&access_token=' . urlencode($token) . '&appsecret_proof=' . mtProof($token, $secret));
                     $pgToken = $pg['data']['access_token'] ?? null;
@@ -1556,6 +1556,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             if (!empty($subYapildi['ok'])) $pgLeadgenAbone = true;
                         }
                     }
+                    // Lead okuma: webhook'un kullandığı token'larla (DB Page Token + System User), son 7 gün
+                    require_once __DIR__ . '/../includes/MetaLeadIsle.php';
+                    $pgSaglik = MetaLeadIsle::leadSaglik($db, $pageIdT, ['saat' => 168, 'eksikDk' => 240]);
                 }
 
                 // ── HTML fragment üret ──
@@ -1723,6 +1726,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         <?php if ($subYapildi !== null): ?>
                             <div class="mt-1"><?= $subYapildi['ok'] ? '<span class="text-success fw-semibold">Abone edildi ✓</span>' : '<span class="text-danger fw-semibold">Abone HATA — ' . $h($subYapildi['data']['error']['message'] ?? ('HTTP ' . $subYapildi['kod'])) . '</span>' ?></div>
                         <?php endif; ?>
+                    </div>
+                    <?php endif; ?>
+                    <?php if ($pgSaglik !== null): ?>
+                    <div class="border rounded p-2 mb-1 small"><b>d) Lead okuma</b> <span class="text-muted">(webhook'un kullandığı kayıtlı token'larla, son 7 gün, aktif formlar)</span>:
+                        <?php if (!empty($pgSaglik['hata'])): ?><span class="text-danger fw-semibold"><?= $h($pgSaglik['hata']) ?></span>
+                        <?php elseif (!$pgSaglik['kodlar']): ?><span class="text-success fw-semibold">SAĞLIKLI ✓</span>
+                        <?php else: ?><span class="text-danger fw-semibold">SORUN: <?= $h(implode(', ', $pgSaglik['kodlar'])) ?></span>
+                            <?php foreach ($pgSaglik['kodlar'] as $kd): ?>
+                                <div class="alert alert-warning py-1 px-2 my-1" style="white-space:pre-line"><?= $h(MetaLeadIsle::saglikTalimat($kd, $pgSaglik)) ?></div>
+                            <?php endforeach; ?>
+                        <?php endif; ?>
+                        <?php if ($pgSaglik['formlar']): ?>
+                        <div class="table-responsive mt-1"><table class="table table-sm table-bordered small mb-0">
+                            <thead class="table-dark"><tr><th>Form</th><th>Page Token</th><th>System User</th><th>Durum</th></tr></thead><tbody>
+                            <?php foreach ($pgSaglik['formlar'] as $ff): ?>
+                            <tr class="<?= $ff['durum'] === 'OK' ? '' : 'table-danger' ?>">
+                                <td><?= $h($ff['ad']) ?><br><code><?= $h($ff['fid']) ?></code></td>
+                                <?php foreach (['sayfa', 'sistem'] as $tr): $r = $ff['sonuc'][$tr] ?? null; ?>
+                                <td><?= $r === null ? '<span class="text-muted">yok</span>' : ($r['ok'] ? ($r['adet'] > 0 ? '<span class="text-success">' . (int)$r['adet'] . (!empty($r['fazla']) ? '+' : '') . ' lead ✓</span>' : '<span class="text-muted">0 lead</span>') : '<span class="text-danger">' . $h(mb_substr((string)$r['hata'], 0, 90)) . '</span>') ?></td>
+                                <?php endforeach; ?>
+                                <td><?= $h($ff['durum']) ?></td>
+                            </tr>
+                            <?php endforeach; ?></tbody></table></div>
+                        <?php endif; ?>
+                        <?php if ($pgSaglik['eksik']): ?><div class="text-danger mt-1">Panelde olmayan lead: <?= count($pgSaglik['eksik']) ?> (<?= $h(implode(', ', array_slice(array_column($pgSaglik['eksik'], 'id'), 0, 5))) ?>)</div><?php endif; ?>
                     </div>
                     <?php endif; ?>
                 <?php endif; ?>

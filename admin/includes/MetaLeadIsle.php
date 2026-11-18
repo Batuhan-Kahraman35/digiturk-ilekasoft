@@ -28,7 +28,9 @@ class MetaLeadIsle
                    e.Entegrasyonlar_ApiKey             AS AppSecret,
                    e.Entegrasyonlar_BaseURL            AS BaseURL,
                    e.Entegrasyonlar_WebhookVerifyToken AS VerifyToken,
-                   k.EntegrasyonKanallari_Sifre        AS SistemToken
+                   k.EntegrasyonKanallari_Sifre        AS SistemToken,
+                   k.EntegrasyonKanallari_Instance     AS AppId,
+                   k.EntegrasyonKanallari_id           AS KanalId
             FROM Entegrasyonlar e
             LEFT JOIN EntegrasyonKanallari k
                    ON k.EntegrasyonKanallari_Entegrasyon_id = e.Entegrasyonlar_id AND k.Durum = 1
@@ -136,8 +138,10 @@ class MetaLeadIsle
      *  - gercekTarih  : true → OlusturmaTarihi = lead'in Meta'daki created_time (geriye dönük çekim)
      *  - nokta        : kara liste log noktası
      *  - karaListeLog : false → engelde kara liste logu yazılmaz (cron her turda aynı lead'i görür)
+     *  - kuru         : true → hiçbir şey yazılmaz (INSERT, alan eşleme senkronu, kara liste logu yok);
+     *                   eklenecek lead için durum 'eklenecek' döner (sağlık kontrolü: "panelde olması gereken")
      *
-     * Dönüş: ['durum' => eklendi|mevcut|tokenyok|graph|pasif|kural|karaliste|hata, 'mesaj' => string]
+     * Dönüş: ['durum' => eklendi|eklenecek|mevcut|tokenyok|graph|pasif|kural|karaliste|hata, 'mesaj' => string]
      */
     public static function isle(Database $db, array $baglam, string $leadgenId, string $formId = '', array $sec = []): array
     {
@@ -203,7 +207,8 @@ class MetaLeadIsle
 
         // Form için hiç alan satırı yoksa (yeni form) soruları çekip varsayılan eşlemeyi kur:
         // ad soyad / telefon / e-posta kendi alanına, kalanlar Açıklama'ya
-        if ($formFk) {
+        $kuru = !empty($sec['kuru']);
+        if ($formFk && !$kuru) {
             $alanVar = $db->fetchOne(
                 "SELECT TOP 1 ReklamLeadFormAlanlari_id FROM ReklamLeadFormAlanlari WHERE ReklamLeadFormAlanlari_Form_id = ?",
                 [$formFk]
@@ -232,7 +237,7 @@ class MetaLeadIsle
             'phoneAreaNumber'    => $a['phoneAreaNumber'],
             'phoneNumber'        => $a['phoneNumber'],
         ]);
-        $engel = ($sec['karaListeLog'] ?? true)
+        $engel = (($sec['karaListeLog'] ?? true) && !$kuru)
             ? KaraListe::kontrolVeLogla(
                 $gsm,
                 $sec['nokta'] ?? 'webhook:meta-lead',
@@ -243,6 +248,10 @@ class MetaLeadIsle
             : KaraListe::kontrol($gsm, 'gsm');
         if ($engel) {
             return ['durum' => 'karaliste', 'mesaj' => "KARA LISTE engel lead=$leadgenId gsm=" . $engel['KaraListe_Deger'], 'notlar' => $notlar];
+        }
+
+        if ($kuru) {
+            return ['durum' => 'eklenecek', 'mesaj' => "EKLENECEK lead=$leadgenId", 'notlar' => $notlar];
         }
 
         $now    = date('Y-m-d H:i:s');
@@ -329,5 +338,138 @@ class MetaLeadIsle
         $sonraki = !empty($r['data']['paging']['next']) ? ($r['data']['paging']['cursors']['after'] ?? null) : null;
         if ($sonraki !== null && $yedekte) $sonraki = 'y:' . $sonraki;
         return ['ok' => true, 'hata' => null, 'sonraki' => $sonraki, 'sayac' => $sayac, 'yedekToken' => $yedekte];
+    }
+
+    /** leadSaglik() sorun kodunun açıklaması + yapılacak iş (destek talebi ve panel uyarısı). */
+    public static function saglikTalimat(string $kod, array $s): string
+    {
+        $ad = $s['sayfa']['ad'] . ' (' . $s['sayfa']['ext'] . ')';
+        return match ($kod) {
+            'OKUMA_YOK' => "Lead'ler hiçbir token ile okunamıyor; yeni lead'ler panele DÜŞMÜYOR.\n"
+                         . "Yapılacak: Reklam Yönetimi → Facebook Sayfaları → Meta Bağlan (OAuth) ile sayfa token'ı yenilenmeli, "
+                         . "sayfa ILEKA sistem kullanıcısına atanmalı ve İşletme Ayarları → Potansiyel Müşteri Bilgileri Erişimi kontrol edilmeli.",
+            'EKSIK'     => count($s['eksik']) . " lead Meta'da var ama panelde yok (webhook ve eksik lead cron'u almamış).\n"
+                         . "Yapılacak: Reklam Yönetimi → ilgili form → Eksik lead çek; sonra kök neden (token/abonelik) incelenmeli.",
+            'KISIT'     => "Sayfa token'ı lead verisini okuyamıyor (Potansiyel Müşteri Erişimi kısıtı). Lead'ler şu an System User token'ı ile "
+                         . "alınıyor; o erişim de kalkarsa lead'ler tamamen durur.\n"
+                         . "Yapılacak: İşletme Ayarları → Entegrasyonlar → Potansiyel Müşteri Bilgileri Erişimi → {$s['sayfa']['ad']} → "
+                         . 'Kişiler: ' . ($s['tokenSahibi'] ?: 'token sahibi kullanıcı') . " eklenmeli; CRM'ler: uygulama "
+                         . ($s['appId'] ?: '-') . ' ekli olmalı.',
+            'ABONELIK'  => "Sayfanın leadgen webhook aboneliği yok; yeni lead'ler anlık gelmez (yalnız 3 saatlik eksik lead cron'u ile gelir).\n"
+                         . "Yapılacak: Reklam Yönetimi → Facebook Sayfaları → {$ad} → 📡 Webhook aboneliği.",
+            default     => $kod,
+        };
+    }
+
+    /**
+     * Sayfanın lead akış sağlığı (salt okuma; cron meta_lead_saglik + Meta Bağlantı Testi).
+     * Webhook'un gerçekte kullandığı token'larla (DB'deki Page Token + System User) ölçer:
+     *  - OKUMA_YOK : bir aktif formun lead'leri hiçbir token'la okunamıyor → lead'ler kayboluyor
+     *  - EKSIK     : son N saatte Meta'da olup panelde olmayan (kural/kara liste/pasif dışı) lead var
+     *  - KISIT     : Page Token lead'i okuyamıyor (hata/boş) ama System User okuyor → Potansiyel Müşteri Erişimi kısıtı
+     *  - ABONELIK  : sayfanın bizim app'e leadgen webhook aboneliği yok
+     *
+     * $sec: saat (varsayılan 24) → lead penceresi, eksikDk (varsayılan 60) → bu süreden yeni lead eksik sayılmaz
+     */
+    public static function leadSaglik(Database $db, string $pageId, array $sec = []): array
+    {
+        $saat    = max(1, (int)($sec['saat'] ?? 24));
+        $eksikDk = max(0, (int)($sec['eksikDk'] ?? 60));
+        $sonuc   = ['sayfa' => ['ext' => $pageId, 'ad' => $pageId], 'formlar' => [], 'abonelik' => null, 'abonelikHata' => null,
+                    'eksik' => [], 'tokenSahibi' => null, 'kodlar' => [], 'appId' => null];
+
+        $sayfa = $db->fetchOne("
+            SELECT ReklamFacebookSayfalari_id AS id, ReklamFacebookSayfalari_SayfaAdi AS ad, ReklamFacebookSayfalari_Token AS token
+            FROM ReklamFacebookSayfalari WHERE ReklamFacebookSayfalari_SayfaID = ?
+        ", [$pageId]);
+        if (!$sayfa) { $sonuc['kodlar'][] = 'OKUMA_YOK'; $sonuc['hata'] = 'Sayfa kayıtlı değil.'; return $sonuc; }
+        $sonuc['sayfa'] = ['id' => (int)$sayfa['id'], 'ext' => $pageId, 'ad' => (string)$sayfa['ad']];
+
+        $baglam = self::sayfaBaglami($db, self::configListesi($db), $pageId);
+        if (!$baglam) { $sonuc['kodlar'][] = 'OKUMA_YOK'; $sonuc['hata'] = 'Token yok.'; return $sonuc; }
+        $cfg = $baglam['cfg'];
+        $sonuc['appId'] = (string)($cfg['AppId'] ?? '') ?: null;
+
+        // Token'lar: Page Token (varsa) + System User
+        $sayfaToken = trim((string)($sayfa['token'] ?? ''));
+        $tokenlar   = [];
+        if ($sayfaToken !== '') $tokenlar['sayfa'] = ['token' => $sayfaToken, 'cfg' => $cfg];
+        if (trim((string)$cfg['SistemToken']) !== '' && $cfg['SistemToken'] !== $sayfaToken) {
+            $tokenlar['sistem'] = ['token' => (string)$cfg['SistemToken'], 'cfg' => $cfg];
+        }
+
+        $formlar = $db->fetchAll("
+            SELECT ReklamLeadFormlari_FormID AS fid, ReklamLeadFormlari_FormAdi AS ad
+            FROM ReklamLeadFormlari
+            WHERE ReklamLeadFormlari_Sayfa_id = ? AND Durum = 1 AND ReklamLeadFormlari_FormDurumu = 'ACTIVE'
+              AND ReklamLeadFormlari_FormID NOT LIKE '%[^0-9]%'
+            ORDER BY ReklamLeadFormlari_id
+        ", [(int)$sayfa['id']]) ?: [];
+
+        $params = ['fields' => 'id,created_time,field_data,form_id', 'limit' => 100, 'filtering' => json_encode([[
+            'field' => 'time_created', 'operator' => 'GREATER_THAN', 'value' => time() - $saat * 3600,
+        ]])];
+        $esik = time() - $eksikDk * 60;
+        $kisitVar = false; $okumaYok = false;
+
+        foreach ($formlar as $f) {
+            $satir = ['fid' => $f['fid'], 'ad' => $f['ad'], 'sonuc' => [], 'durum' => 'OK'];
+            $enIyi = null; $enIyiBaglam = null;
+            foreach ($tokenlar as $tur => $b) {
+                $r    = self::graphGet(self::url($b, $f['fid'] . '/leads', $params), 60);
+                $adet = $r['ok'] ? count($r['data']['data'] ?? []) : 0;
+                $satir['sonuc'][$tur] = ['ok' => $r['ok'], 'adet' => $adet, 'fazla' => $r['ok'] && !empty($r['data']['paging']['next']), 'hata' => $r['ok'] ? null : self::hataMetni($r)];
+                if ($r['ok'] && ($enIyi === null || $adet > count($enIyi['data']['data'] ?? []))) { $enIyi = $r; $enIyiBaglam = $b; }
+            }
+            $sy = $satir['sonuc']['sayfa'] ?? null; $si = $satir['sonuc']['sistem'] ?? null;
+
+            if ($enIyi === null) {
+                $satir['durum'] = 'OKUMA_YOK'; $okumaYok = true;
+            } elseif ($sy && $si && $si['adet'] > 0 && (!$sy['ok'] || $sy['adet'] === 0)) {
+                $satir['durum'] = 'KISIT'; $kisitVar = true;
+            }
+
+            // Panelde olması gereken ama olmayan lead'ler (kuru isle: kural / kara liste / pasif elenir)
+            foreach (($enIyi['data']['data'] ?? []) as $lead) {
+                $ts = strtotime((string)($lead['created_time'] ?? '')) ?: time();
+                if ($ts > $esik) continue;
+                $i = self::isle($db, $enIyiBaglam, (string)($lead['id'] ?? ''), (string)$f['fid'], ['lead' => $lead, 'kuru' => true]);
+                if ($i['durum'] === 'eklenecek') {
+                    $sonuc['eksik'][] = ['id' => (string)$lead['id'], 'tarih' => self::yerelTarih($lead['created_time'] ?? null), 'form' => $f['ad']];
+                }
+            }
+            $sonuc['formlar'][] = $satir;
+        }
+
+        // Webhook aboneliği (Page Token gerekir)
+        if (isset($tokenlar['sayfa'])) {
+            $r = self::graphGet(self::url($tokenlar['sayfa'], $pageId . '/subscribed_apps', ['fields' => 'id,name,subscribed_fields']));
+            if (!$r['ok']) {
+                $sonuc['abonelikHata'] = self::hataMetni($r);
+            } else {
+                $sonuc['abonelik'] = false;
+                foreach (($r['data']['data'] ?? []) as $app) {
+                    if ($sonuc['appId'] && (string)($app['id'] ?? '') !== $sonuc['appId']) continue;
+                    if (in_array('leadgen', $app['subscribed_fields'] ?? [], true)) { $sonuc['abonelik'] = true; break; }
+                }
+            }
+        }
+
+        // Kısıtta talimat için Page Token sahibi (Potansiyel Müşteri Erişimi'ne eklenecek kişi)
+        if ($kisitVar && isset($tokenlar['sayfa'], $tokenlar['sistem'])) {
+            $base = rtrim((string)$cfg['BaseURL'], '/');
+            $d    = self::graphGet($base . '/debug_token?' . http_build_query(['input_token' => $sayfaToken, 'access_token' => $cfg['SistemToken']]));
+            $uid  = (string)($d['data']['data']['user_id'] ?? '');
+            if ($uid !== '') {
+                $n = self::graphGet(self::url($tokenlar['sistem'], $uid, ['fields' => 'name']));
+                $sonuc['tokenSahibi'] = (string)($n['data']['name'] ?? '') ?: "kullanıcı #$uid";
+            }
+        }
+
+        if ($okumaYok)                     $sonuc['kodlar'][] = 'OKUMA_YOK';
+        if ($sonuc['eksik'])               $sonuc['kodlar'][] = 'EKSIK';
+        if ($kisitVar)                     $sonuc['kodlar'][] = 'KISIT';
+        if ($sonuc['abonelik'] === false)  $sonuc['kodlar'][] = 'ABONELIK';
+        return $sonuc;
     }
 }
