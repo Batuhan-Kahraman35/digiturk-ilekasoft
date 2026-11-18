@@ -128,6 +128,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     k.kullanici_soyad,
                     k.kullanici_telefon,
                     k.kullanici_durum,
+                    k.kullanici_sifre_degistirmeli,
                     k.kullanici_departman_id,
                     k.kullanici_birim_id,
                     k.kullanici_tc_kimlik_no,
@@ -328,6 +329,53 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 'success' => true,
                 'durum' => $durum,
                 'message' => $durum === 1 ? 'Personel aktif edildi' : 'Personel pasife alındı'
+            ]);
+            exit;
+        }
+
+        if ($action === 'giris_bilgisi_olustur') {
+            // Yeni şifre atanır, giriş bilgisi metni kopyalanmak üzere döner
+            if (!$pagePermissions['can_edit']) {
+                throw new Exception('Düzenleme yetkiniz bulunmamaktadır.');
+            }
+
+            $id = intval($_POST['id'] ?? 0);
+            $sifre = trim($_POST['sifre'] ?? '');
+            $sifreDegistirmeli = intval($_POST['sifre_degistirmeli'] ?? 0) === 1 ? 1 : 0;
+
+            if ($id <= 0) {
+                throw new Exception('Geçersiz kullanıcı');
+            }
+            if (mb_strlen($sifre) < 6) {
+                throw new Exception('Şifre en az 6 karakter olmalıdır');
+            }
+
+            $hedef = $db->fetchOne("SELECT kullanici_email FROM kullanicilar WHERE kullanici_id = ?", [$id]);
+            if (!$hedef || empty($hedef['kullanici_email'])) {
+                throw new Exception('Kullanıcının e-posta adresi bulunamadı');
+            }
+
+            $db->update('kullanicilar', [
+                'kullanici_sifre_hash' => password_hash($sifre, PASSWORD_DEFAULT),
+                'kullanici_sifre_degistirmeli' => $sifreDegistirmeli,
+                'kullanici_guncelleme_tarihi' => date('Y-m-d H:i:s'),
+                'kullanici_guncelleyen_id' => $_SESSION['user_id'] ?? null,
+            ], ['kullanici_id' => $id]);
+
+            $girisUrl = 'https://' . $_SERVER['HTTP_HOST'] . '/admin/';
+            $satirlar = [
+                'URL: ' . $girisUrl,
+                'Kullanıcı Adı: ' . $hedef['kullanici_email'],
+                'Şifre: ' . $sifre,
+            ];
+            if ($sifreDegistirmeli === 1) {
+                $satirlar[] = 'Not: İlk girişte şifre değiştirme zorunludur.';
+            }
+
+            echo json_encode([
+                'success' => true,
+                'message' => 'Şifre güncellendi',
+                'metin' => implode("\n", $satirlar)
             ]);
             exit;
         }
@@ -977,6 +1025,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                 buttons += `<a href="/Admin/personel-form?id=${data.kullanici_id}" class="btn btn-sm btn-warning me-1" title="Düzenle">
                                     <i class="bi bi-pencil"></i>
                                 </a>`;
+                                buttons += `<button class="btn btn-sm btn-secondary me-1" onclick="girisBilgisiKopyala(${data.kullanici_id}, '${adSoyad}', '${data.kullanici_email}', ${data.kullanici_sifre_degistirmeli == 1 ? 1 : 0})" title="Giriş bilgilerini kopyala">
+                                    <i class="bi bi-clipboard"></i>
+                                </button>`;
                             }
 
                             if (permissions.can_delete) {
@@ -1175,6 +1226,108 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }).fail(() => {
                     Swal.fire('Bağlantı Hatası!', 'Sunucuya ulaşılamıyor.', 'error');
                 });
+            });
+        }
+
+        function rastgeleSifre(uzunluk = 10) {
+            const karakterler = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
+            const dizi = new Uint32Array(uzunluk);
+            crypto.getRandomValues(dizi);
+            return Array.from(dizi, n => karakterler[n % karakterler.length]).join('');
+        }
+
+        function panoyaKopyala(metin) {
+            if (navigator.clipboard && window.isSecureContext) {
+                return navigator.clipboard.writeText(metin);
+            }
+            return new Promise((resolve, reject) => {
+                const ta = document.createElement('textarea');
+                ta.value = metin;
+                ta.style.position = 'fixed';
+                ta.style.opacity = '0';
+                document.body.appendChild(ta);
+                ta.select();
+                document.execCommand('copy') ? resolve() : reject();
+                ta.remove();
+            });
+        }
+
+        function girisBilgisiKopyala(id, adSoyad, email, sifreDegistirmeli) {
+            Swal.fire({
+                title: 'Giriş Bilgilerini Kopyala',
+                width: 520,
+                html: `
+                    <div class="text-start">
+                        <p class="mb-2"><strong>${adSoyad}</strong></p>
+                        <div class="mb-2">
+                            <label class="form-label small mb-1">URL</label>
+                            <input type="text" class="form-control form-control-sm" value="${location.origin}/admin/" readonly>
+                        </div>
+                        <div class="mb-2">
+                            <label class="form-label small mb-1">Kullanıcı Adı</label>
+                            <input type="text" class="form-control form-control-sm" value="${email}" readonly>
+                        </div>
+                        <div class="mb-2">
+                            <label class="form-label small mb-1" for="gb_sifre">Yeni Şifre</label>
+                            <div class="input-group input-group-sm">
+                                <input type="text" class="form-control" id="gb_sifre" value="${rastgeleSifre()}" autocomplete="off">
+                                <button type="button" class="btn btn-outline-secondary" id="gb_yenile" title="Yeni şifre üret">
+                                    <i class="bi bi-arrow-repeat"></i>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="form-check form-switch mb-2">
+                            <input class="form-check-input" type="checkbox" role="switch" id="gb_sifre_degistirmeli" value="1" ${sifreDegistirmeli ? 'checked' : ''}>
+                            <label class="form-check-label" for="gb_sifre_degistirmeli">İlk Girişte Şifre Değiştirme Zorunlu</label>
+                        </div>
+                        <div class="alert alert-warning py-2 small mb-0">
+                            <i class="bi bi-exclamation-triangle"></i> Kullanıcının mevcut şifresi bu yeni şifre ile değiştirilecektir.
+                        </div>
+                    </div>`,
+                showCancelButton: true,
+                confirmButtonColor: '#6c757d',
+                cancelButtonText: 'İptal',
+                confirmButtonText: '<i class="bi bi-clipboard-check"></i> Kaydet ve Kopyala',
+                showLoaderOnConfirm: true,
+                didOpen: () => {
+                    document.getElementById('gb_yenile').addEventListener('click', () => {
+                        document.getElementById('gb_sifre').value = rastgeleSifre();
+                    });
+                },
+                preConfirm: () => {
+                    const sifre = document.getElementById('gb_sifre').value.trim();
+                    if (sifre.length < 6) {
+                        Swal.showValidationMessage('Şifre en az 6 karakter olmalıdır');
+                        return false;
+                    }
+                    const body = new URLSearchParams({
+                        action: 'giris_bilgisi_olustur',
+                        id: id,
+                        sifre: sifre,
+                        sifre_degistirmeli: document.getElementById('gb_sifre_degistirmeli').checked ? 1 : 0
+                    });
+                    return fetch('/Admin/pages/personel-yonetimi.php', { method: 'POST', body })
+                        .then(r => r.json())
+                        .then(data => {
+                            if (!data.success) throw new Error(data.message);
+                            return data;
+                        })
+                        .catch(err => Swal.showValidationMessage(err.message || 'Sunucuya ulaşılamıyor.'));
+                }
+            }).then(result => {
+                if (!result.isConfirmed || !result.value) return;
+                const metin = result.value.metin;
+                table.ajax.reload(null, false);
+                panoyaKopyala(metin)
+                    .then(() => showToast('Şifre güncellendi, giriş bilgileri kopyalandı', 'success'))
+                    .catch(() => {
+                        Swal.fire({
+                            title: 'Kopyalanamadı',
+                            html: `<p class="small">Şifre güncellendi. Metni elle kopyalayın:</p>
+                                   <textarea class="form-control" rows="5" readonly>${metin}</textarea>`,
+                            icon: 'warning'
+                        });
+                    });
             });
         }
 
