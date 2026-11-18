@@ -100,6 +100,7 @@ function dagitimProfili(string $tip): ?array {
  *   sadece_isimli (varsayılan 0): İsim ve Soyisim dolu
  *   sadece_reklam (varsayılan 0): reklam lead formundan gelen
  *   reklam_leadformlari[]        : sadece_reklam=1 iken seçili lead formları (boşsa tümü)
+ *   tarih_bas / tarih_bit (Y-m-d, isteğe bağlı): OlusturmaTarihi aralığı (bitiş günü dahil)
  */
 function dagitimEkWhere(array $post): string {
     $w = '';
@@ -117,6 +118,11 @@ function dagitimEkWhere(array $post): string {
         }
     }
     if (($post['karaliste_haric'] ?? '1') === '1') $w .= " AND NOT " . karaListeEslesmeSql();
+    // Başvuru tarihi aralığı (isteğe bağlı). Tarih DateTime ile doğrulanıp yeniden biçimlendirilir → enjeksiyon riski yok.
+    $tarihBas = DateTime::createFromFormat('!Y-m-d', trim((string)($post['tarih_bas'] ?? '')));
+    $tarihBit = DateTime::createFromFormat('!Y-m-d', trim((string)($post['tarih_bit'] ?? '')));
+    if ($tarihBas) $w .= " AND t.OlusturmaTarihi >= CONVERT(DATETIME, '" . $tarihBas->format('Y-m-d') . " 00:00:00', 120)";
+    if ($tarihBit) $w .= " AND t.OlusturmaTarihi < DATEADD(DAY, 1, CONVERT(DATETIME, '" . $tarihBit->format('Y-m-d') . " 00:00:00', 120))";
     return $w;
 }
 
@@ -2349,6 +2355,19 @@ $dagitLeadFormlari = $db->fetchAll("
           </button>
         </div>
 
+        <!-- Başvuru tarihi aralığı (isteğe bağlı): boş bırakılırsa tarih kısıtı yok -->
+        <div class="row g-2 mb-1">
+          <div class="col-6">
+            <label class="form-label small mb-1" for="dagitTarihBas">Başvuru Tarihi (Başlangıç)</label>
+            <input type="date" class="form-control form-control-sm dagit-filtre" id="dagitTarihBas">
+          </div>
+          <div class="col-6">
+            <label class="form-label small mb-1" for="dagitTarihBit">Başvuru Tarihi (Bitiş)</label>
+            <input type="date" class="form-control form-control-sm dagit-filtre" id="dagitTarihBit">
+          </div>
+        </div>
+        <div class="form-text mb-3">Boş bırakılırsa tüm tarihlerdeki başvurular dağıtılır.</div>
+
         <div class="mb-3">
           <div class="form-check form-switch">
             <input class="form-check-input dagit-filtre" type="checkbox" role="switch" id="dagitSadeceOtp" checked>
@@ -2858,6 +2877,8 @@ $dagitLeadFormlari = $db->fetchAll("
             sadece_reklam:   reklam ? '1' : '0',
             reklam_leadformlari: reklam ? dagitSeciliLeadFormlari() : [],
             karaliste_haric: dagitKaraListeHaric(),
+            tarih_bas:       $('#dagitTarihBas').val() || '',
+            tarih_bit:       $('#dagitTarihBit').val() || '',
         };
     }
 
