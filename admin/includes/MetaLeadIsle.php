@@ -97,8 +97,22 @@ class MetaLeadIsle
         }
         if (!$cfg) return null;
 
-        $token = trim((string)($sayfa['ReklamFacebookSayfalari_Token'] ?? '')) ?: (string)$cfg['SistemToken'];
-        return $token === '' ? null : ['token' => $token, 'cfg' => $cfg];
+        $sayfaToken  = trim((string)($sayfa['ReklamFacebookSayfalari_Token'] ?? ''));
+        $sistemToken = trim((string)($cfg['SistemToken'] ?? ''));
+        $token       = $sayfaToken ?: $sistemToken;
+        if ($token === '') return null;
+
+        // Yedek token: sayfa token'ı lead okuyamazsa (Lead Access kısıtı) System User denenir.
+        // Ters durum da olur (System User'ın erişimi yok, sayfa token'ı var); birincil her zaman sayfa token'ı.
+        $yedek = ($sayfaToken !== '' && $sistemToken !== '' && $sayfaToken !== $sistemToken) ? $sistemToken : null;
+        return ['token' => $token, 'cfg' => $cfg, 'yedekToken' => $yedek];
+    }
+
+    /** Bağlamın yedek token'lı kopyası; yedek yoksa null. */
+    private static function yedekBaglam(array $baglam): ?array
+    {
+        $t = (string)($baglam['yedekToken'] ?? '');
+        return $t === '' ? null : ['token' => $t, 'cfg' => $baglam['cfg'], 'yedekToken' => null];
     }
 
     /** Meta created_time (ISO 8601, UTC) → yerel saat 'Y-m-d H:i:s'. Okunamazsa null. */
@@ -134,10 +148,19 @@ class MetaLeadIsle
             return ['durum' => 'mevcut', 'mesaj' => "MEVCUT lead=$leadgenId"];
         }
 
-        // Lead detayı
+        // Lead detayı (birincil token okuyamazsa yedek token denenir)
+        $notlar = [];
         $lead = $sec['lead'] ?? null;
         if (!$lead) {
-            $r = self::graphGet(self::url($baglam, $leadgenId, ['fields' => 'field_data,form_id,created_time']));
+            $alanlar = ['fields' => 'field_data,form_id,created_time'];
+            $r = self::graphGet(self::url($baglam, $leadgenId, $alanlar));
+            if (!$r['ok'] && ($yb = self::yedekBaglam($baglam))) {
+                $ry = self::graphGet(self::url($yb, $leadgenId, $alanlar));
+                if ($ry['ok']) {
+                    $notlar[] = "Yedek token ile okundu lead=$leadgenId (birincil: " . self::hataMetni($r) . ')';
+                    $r = $ry; $baglam = $yb;
+                }
+            }
             if (!$r['ok']) {
                 return ['durum' => 'graph', 'mesaj' => "Graph HATA lead=$leadgenId kod={$r['kod']} " . self::hataMetni($r)];
             }
@@ -180,7 +203,6 @@ class MetaLeadIsle
 
         // Form için hiç alan satırı yoksa (yeni form) soruları çekip varsayılan eşlemeyi kur:
         // ad soyad / telefon / e-posta kendi alanına, kalanlar Açıklama'ya
-        $notlar = [];
         if ($formFk) {
             $alanVar = $db->fetchOne(
                 "SELECT TOP 1 ReklamLeadFormAlanlari_id FROM ReklamLeadFormAlanlari WHERE ReklamLeadFormAlanlari_Form_id = ?",
@@ -266,6 +288,15 @@ class MetaLeadIsle
             return ['ok' => false, 'hata' => 'Sayfa token\'ı bulunamadı.', 'sonraki' => null, 'sayac' => $sayac];
         }
 
+        // Yedek token'la başlamış sayfalama: cursor 'y:' önekiyle döner, aynı token'la sürdürülür
+        $yedekte = $after !== null && str_starts_with($after, 'y:');
+        if ($yedekte) {
+            $after = substr($after, 2);
+            $yb = self::yedekBaglam($baglam);
+            if (!$yb) return ['ok' => false, 'hata' => 'Yedek token bulunamadı.', 'sonraki' => null, 'sayac' => $sayac];
+            $baglam = $yb;
+        }
+
         $params = ['fields' => 'id,created_time,field_data,form_id', 'limit' => $limit];
         if ($after) $params['after'] = $after;
         if ($baslangicTs) {
@@ -275,6 +306,15 @@ class MetaLeadIsle
         }
 
         $r = self::graphGet(self::url($baglam, $form['FormID'] . '/leads', $params), 60);
+
+        // Lead Access kısıtında sayfa token'ı hata yerine BOŞ liste döner; ilk sayfada boş/hata → yedek token
+        if (!$yedekte && $after === null && (!$r['ok'] || empty($r['data']['data'])) && ($yb = self::yedekBaglam($baglam))) {
+            $ry = self::graphGet(self::url($yb, $form['FormID'] . '/leads', $params), 60);
+            if ($ry['ok'] && !empty($ry['data']['data'])) {
+                $r = $ry; $baglam = $yb; $yedekte = true;
+            }
+        }
+
         if (!$r['ok']) {
             return ['ok' => false, 'hata' => self::hataMetni($r), 'sonraki' => null, 'sayac' => $sayac];
         }
@@ -287,6 +327,7 @@ class MetaLeadIsle
         }
 
         $sonraki = !empty($r['data']['paging']['next']) ? ($r['data']['paging']['cursors']['after'] ?? null) : null;
-        return ['ok' => true, 'hata' => null, 'sonraki' => $sonraki, 'sayac' => $sayac];
+        if ($sonraki !== null && $yedekte) $sonraki = 'y:' . $sonraki;
+        return ['ok' => true, 'hata' => null, 'sonraki' => $sonraki, 'sayac' => $sayac, 'yedekToken' => $yedekte];
     }
 }

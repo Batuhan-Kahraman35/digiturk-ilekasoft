@@ -2056,6 +2056,7 @@ function gorevMetaEksikLead(array $params, $db): array
                     break;
                 }
                 if ($sayfa === 0) $okunan++;
+                if ($sayfa === 0 && !empty($r['yedekToken'])) echo "  ~ #{$f['id']} {$f['ad']}: sayfa token'ı lead okuyamadı, yedek token kullanıldı\n";
                 foreach ($top as $k => $_) $top[$k] += (int)($r['sayac'][$k] ?? 0);
                 $formEklenen += (int)$r['sayac']['eklendi'];
                 $after = $r['sonraki'];
