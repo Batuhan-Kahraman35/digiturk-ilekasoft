@@ -50,6 +50,93 @@ if (!function_exists('hakedisAltBayiApply')) {
     }
 }
 
+if (!function_exists('hakedisPersonelListesi')) {
+    /** Personel filtresi (IrisRapor_TalebiGirenPersonel adları): tekil, boşsuz, en fazla 200 */
+    function hakedisPersonelListesi($gelen): array {
+        if (!is_array($gelen)) $gelen = ($gelen === '' || $gelen === null) ? [] : [$gelen];
+        $liste = array_values(array_unique(array_filter(array_map(fn($p) => trim((string)$p), $gelen), fn($p) => $p !== '')));
+        return array_slice($liste, 0, 200);
+    }
+}
+
+if (!function_exists('hakedisBayiSkalaSetId')) {
+    /**
+     * Alt bayinin dönemde geçerli skala seti (hakedisKademeApply ile aynı kural):
+     * dönemden önce/aynı dönemde başlayan en son atama, yoksa varsayılan set.
+     */
+    function hakedisBayiSkalaSetId($db, ?int $altBayiId, int $yil, int $ay): ?int {
+        if ($altBayiId) {
+            $r = $db->fetchOne("
+                SELECT TOP 1 x.HakedisAltBayiSkalaSetleri_Set_id AS id
+                FROM dbo.HakedisAltBayiSkalaSetleri x
+                JOIN dbo.HakedisSkalaSetleri s
+                  ON s.HakedisSkalaSetleri_id = x.HakedisAltBayiSkalaSetleri_Set_id AND s.Durum = 1
+                WHERE x.HakedisAltBayiSkalaSetleri_AltBayi_id = ? AND x.Durum = 1
+                  AND x.HakedisAltBayiSkalaSetleri_BaslangicYil * 100 + x.HakedisAltBayiSkalaSetleri_BaslangicAy <= ?
+                ORDER BY x.HakedisAltBayiSkalaSetleri_BaslangicYil DESC, x.HakedisAltBayiSkalaSetleri_BaslangicAy DESC
+            ", [$altBayiId, $yil * 100 + $ay]);
+            if ($r) return (int)$r['id'];
+        }
+        $v = $db->fetchOne("SELECT TOP 1 HakedisSkalaSetleri_id AS id FROM dbo.HakedisSkalaSetleri WHERE HakedisSkalaSetleri_Varsayilan = 1 AND Durum = 1");
+        return $v ? (int)$v['id'] : null;
+    }
+}
+
+if (!function_exists('hakedisSetKademeleri')) {
+    /** Setin aktif kademeleri, Sira'ya göre: [{id, ad, alt, ust}] */
+    function hakedisSetKademeleri($db, int $setId): array {
+        return array_map(fn($k) => [
+            'id'  => (int)$k['id'],
+            'ad'  => (string)$k['ad'],
+            'alt' => (int)$k['alt'],
+            'ust' => $k['ust'] !== null ? (int)$k['ust'] : null,
+        ], $db->fetchAll("
+            SELECT HakedisSkalaKademeleri_id AS id, HakedisSkalaKademeleri_Ad AS ad,
+                   HakedisSkalaKademeleri_AltSinir AS alt, HakedisSkalaKademeleri_UstSinir AS ust
+            FROM dbo.HakedisSkalaKademeleri
+            WHERE HakedisSkalaKademeleri_Set_id = ? AND Durum = 1
+            ORDER BY HakedisSkalaKademeleri_Sira, HakedisSkalaKademeleri_AltSinir DESC
+        ", [$setId]));
+    }
+}
+
+if (!function_exists('hakedisKademeApply')) {
+    /**
+     * Adet toplamından skala kademesini bulan OUTER APPLY (alias: kd → SkalaKodu, SkalaAd).
+     *
+     * Set seçimi: alt bayinin dönemden önce/aynı dönemde başlayan en son ataması
+     * (HakedisAltBayiSkalaSetleri); ataması yoksa varsayılan set (HakedisSkalaSetleri_Varsayilan = 1).
+     * Kademe: AltSinir dahil, UstSinir hariç (NULL = sınırsız). Boşluğa düşen adette kd NULL döner.
+     *
+     * @param string $toplamKolon  adet toplamı kolonu (ör. g.GrupToplam)
+     * @param string $altBayiKolon alt bayi id kolonu (NULL olabilir → varsayılan set)
+     */
+    function hakedisKademeApply(string $toplamKolon, string $altBayiKolon, int $yil, int $ay): string {
+        $donem = $yil * 100 + $ay;   // int, literal gömülür
+        return "OUTER APPLY (
+                    SELECT TOP 1 k.HakedisSkalaKademeleri_id AS SkalaKodu,
+                                 k.HakedisSkalaKademeleri_Ad AS SkalaAd
+                    FROM dbo.HakedisSkalaKademeleri k
+                    WHERE k.Durum = 1
+                      AND k.HakedisSkalaKademeleri_Set_id = ISNULL(
+                            (SELECT TOP 1 x.HakedisAltBayiSkalaSetleri_Set_id
+                               FROM dbo.HakedisAltBayiSkalaSetleri x
+                               JOIN dbo.HakedisSkalaSetleri xs
+                                 ON xs.HakedisSkalaSetleri_id = x.HakedisAltBayiSkalaSetleri_Set_id AND xs.Durum = 1
+                              WHERE x.HakedisAltBayiSkalaSetleri_AltBayi_id = {$altBayiKolon}
+                                AND x.Durum = 1
+                                AND x.HakedisAltBayiSkalaSetleri_BaslangicYil * 100 + x.HakedisAltBayiSkalaSetleri_BaslangicAy <= {$donem}
+                              ORDER BY x.HakedisAltBayiSkalaSetleri_BaslangicYil DESC, x.HakedisAltBayiSkalaSetleri_BaslangicAy DESC),
+                            (SELECT TOP 1 vs.HakedisSkalaSetleri_id
+                               FROM dbo.HakedisSkalaSetleri vs
+                              WHERE vs.HakedisSkalaSetleri_Varsayilan = 1 AND vs.Durum = 1))
+                      AND {$toplamKolon} >= k.HakedisSkalaKademeleri_AltSinir
+                      AND (k.HakedisSkalaKademeleri_UstSinir IS NULL OR {$toplamKolon} < k.HakedisSkalaKademeleri_UstSinir)
+                    ORDER BY k.HakedisSkalaKademeleri_AltSinir DESC
+                ) kd";
+    }
+}
+
 /**
  * Alt bayi × kampanya hakediş hesabı.
  *
@@ -63,6 +150,8 @@ function hakedisHesapla(array $in, $db, bool $birimKisitli, array $izinliBirimId
     $birimId   = (int)($in['birim'] ?? 0);     // 0  = tümü (seçilen birim + alt birimleri)
     $outlet    = trim((string)($in['outlet'] ?? ''));
     $satis     = trim((string)($in['satis'] ?? ''));
+    // Personel filtresi: adetleri daraltır, skala kademesi bayinin TÜM satışından hesaplanır
+    $personeller = hakedisPersonelListesi($in['personel'] ?? []);
 
     // Manuel tarih aralığı (dolu ve geçerli ise tanım/formülü ezer)
     $mBas   = trim((string)($in['bas'] ?? ''));
@@ -155,6 +244,17 @@ function hakedisHesapla(array $in, $db, bool $birimKisitli, array $izinliBirimId
         if ($outlet !== '') { $durumFilter .= " AND r.IrisRapor_GuncelOutletDurum = ?"; $qp[] = $outlet; }
         if ($satis  !== '') { $durumFilter .= " AND r.IrisRapor_SatisDurumu = ?";       $qp[] = $satis; }
 
+        // Personel: bayiToplam + kampanyaAdet'e uygulanır (grupToplam'a değil → kademe değişmez).
+        // CTE sırası bayiToplam → kampanyaAdet olduğu için parametreler iki kez, bu sırayla eklenir.
+        $personelBt = $personelKa = '';
+        if ($personeller) {
+            $pPh = implode(',', array_fill(0, count($personeller), '?'));
+            $personelBt = " WHERE Personel IN ($pPh)";
+            $personelKa = " WHERE u.Personel IN ($pPh)";
+            foreach ($personeller as $pp) $qp[] = $pp;
+            foreach ($personeller as $pp) $qp[] = $pp;
+        }
+
         // uygun (dönemdeki uygun kayıtlar) → bayiToplam (skala kademesi) + kampanyaAdet (kampanya bazında adet)
         // Kampanya tutarı correlated subquery ile. DonemAy/DonemYil (int) literal gömülür (injection yok).
         $sql = "
@@ -169,6 +269,8 @@ function hakedisHesapla(array $in, $db, bool $birimKisitli, array $izinliBirimId
                     r.IrisRapor_TalepTuru                   AS TalepTuru,
                     r.IrisRapor_MemoKodu                    AS MemoKodu,
                     r.IrisRapor_Kampanya                    AS Kampanya,
+                    r.IrisRapor_DtMusteriNo                 AS MusteriNo,
+                    r.IrisRapor_TalebiGirenPersonel         AS Personel,
                     sg.grupId                               AS GrupId,
                     -- Skala grubu anahtarı: gruba üyeyse grup, değilse bayinin kendisi
                     CASE WHEN sg.grupId IS NOT NULL
@@ -208,20 +310,25 @@ function hakedisHesapla(array $in, $db, bool $birimKisitli, array $izinliBirimId
             ),
             bayiToplam AS (
                 -- Bayinin KENDİ adedi (ekranda görünen); aynı adlı iki bayi ayrı sayılır
-                SELECT Altbayi, AltBayiKey, GrupKey, MAX(GrupId) AS GrupId, COUNT(*) AS Toplam
+                -- MusteriToplam: aynı müşteri no bir kez sayılır (net-kazanc Müşteri Adet)
+                SELECT Altbayi, AltBayiKey, GrupKey, MAX(GrupId) AS GrupId, COUNT(*) AS Toplam,
+                       COUNT(DISTINCT MusteriNo) AS MusteriToplam
                 FROM uygun
+                $personelBt
                 GROUP BY Altbayi, AltBayiKey, GrupKey
             ),
             grupToplam AS (
                 -- Skala kademesi GRUP havuzundan: eşleştirilmiş alt bayilerin adetleri
                 -- toplanır. Gruba üye olmayan bayi kendi anahtarıyla tek başına gelir.
-                SELECT GrupKey, COUNT(*) AS GrupToplam,
-                    CASE WHEN COUNT(*) >= 2000 THEN 1
-                         WHEN COUNT(*) >= 1000 THEN 2
-                         WHEN COUNT(*) >= 500  THEN 3
-                         ELSE 4 END AS SkalaKodu
-                FROM uygun
-                GROUP BY GrupKey
+                -- Kademe, bayinin skala setinden (hakedisKademeApply); grup üyeleri aynı sette
+                -- tutulduğu için set grubun herhangi bir üyesinden çözülür.
+                SELECT g.GrupKey, g.GrupToplam, kd.SkalaKodu, kd.SkalaAd
+                FROM (
+                    SELECT GrupKey, COUNT(*) AS GrupToplam, MIN(AltBayiId) AS SetBayiId
+                    FROM uygun
+                    GROUP BY GrupKey
+                ) g
+                " . hakedisKademeApply('g.GrupToplam', 'g.SetBayiId', $yil, $ay) . "
             ),
             kampanyaAdet AS (
                 SELECT
@@ -253,12 +360,13 @@ function hakedisHesapla(array $in, $db, bool $birimKisitli, array $izinliBirimId
                                AND t3.Durum = 1
                          ))
                  )
+                $personelKa
                 GROUP BY u.Altbayi, u.AltBayiKey, u.AnaBayi, u.Birim, t.HakedisKampanyaTanimlari_KampanyaAdi
             )
             SELECT
                 ka.Birim, ka.BirimId, ka.Altbayi, ka.AnaBayi, ka.AltBayiId, ka.AltBayiKey,
                 ka.KampanyaAdi, ka.TanimId, ka.Adet,
-                bt.Toplam, gt.SkalaKodu, gt.GrupToplam, bt.GrupId,
+                bt.Toplam, bt.MusteriToplam, gt.SkalaKodu, gt.SkalaAd, gt.GrupToplam, bt.GrupId,
                 (SELECT gg2.DigiturkAltBayiSkalaGruplari_Ad
                    FROM dbo.DigiturkAltBayiSkalaGruplari gg2
                   WHERE gg2.DigiturkAltBayiSkalaGruplari_id = bt.GrupId) AS GrupAd,
@@ -301,7 +409,9 @@ function hakedisHesapla(array $in, $db, bool $birimKisitli, array $izinliBirimId
                     'bayiEtiket'  => $anaBayi !== '' ? $anaBayi . ' — ' . $bayiAdi : $bayiAdi,
                     'id'          => $p['AltBayiId'] !== null ? (int)$p['AltBayiId'] : null,
                     'toplam'      => (int)$p['Toplam'],
-                    'kademe'      => (int)$p['SkalaKodu'],
+                    'musteriToplam' => (int)$p['MusteriToplam'],
+                    'kademe'      => $p['SkalaKodu'] !== null ? (int)$p['SkalaKodu'] : null,
+                    'kademeAd'    => $p['SkalaAd'] !== null ? (string)$p['SkalaAd'] : null,
                     // Skala grubu: kademe grup toplam adedinden hesaplandıysa doludur
                     'grupAd'      => ($p['GrupAd'] !== null && $p['GrupAd'] !== '') ? (string)$p['GrupAd'] : null,
                     'grupToplam'  => (int)$p['GrupToplam'],
@@ -426,6 +536,7 @@ function hakedisIrisKayitlari(array $in, $db, bool $birimKisitli, array $izinliB
     $birimId   = (int)($in['birim'] ?? 0);
     $outlet    = trim((string)($in['outlet'] ?? ''));
     $satis     = trim((string)($in['satis'] ?? ''));
+    $personeller = hakedisPersonelListesi($in['personel'] ?? []);
 
     $mBas   = trim((string)($in['bas'] ?? ''));
     $mBit   = trim((string)($in['bit'] ?? ''));
@@ -509,6 +620,10 @@ function hakedisIrisKayitlari(array $in, $db, bool $birimKisitli, array $izinliB
         $durumFilter = '';
         if ($outlet !== '') { $durumFilter .= " AND r.IrisRapor_GuncelOutletDurum = ?"; $qp[] = $outlet; }
         if ($satis  !== '') { $durumFilter .= " AND r.IrisRapor_SatisDurumu = ?";       $qp[] = $satis; }
+        if ($personeller) {
+            $durumFilter .= " AND r.IrisRapor_TalebiGirenPersonel IN (" . implode(',', array_fill(0, count($personeller), '?')) . ")";
+            foreach ($personeller as $pp) $qp[] = $pp;
+        }
         foreach ($birimAdlari as $ba) { $qp[] = $ba; }
 
         $kalan = $LIMIT - count($data) + 1;   // +1: kesilme tespiti için bir fazla çekilir

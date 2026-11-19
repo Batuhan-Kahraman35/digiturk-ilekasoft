@@ -2512,7 +2512,8 @@ function gorevReklamBorcBildir(array $params, $db): array
  *
  *  - Uygun kayıt: GuncelOutletDurum + SatisDurumu filtresi
  *  - Pencere: MemoKapanisTarihi ∈ [$bas .. $bitisHaric)  (üst sınır hariç)
- *  - Skala kademesi: bayinin BU PENCEREDEKİ toplam uygun adedine göre (2000+/1000+/500+/altı)
+ *  - Skala kademesi: bayinin BU PENCEREDEKİ toplam uygun adedine göre, bayinin skala setinden
+ *    (HakedisSkalaKademeleri; atama yoksa varsayılan set)
  *  - Tutar: DigiturkHakedisTanimlari, $ay/$yil döneminden
  *
  * $tumKampanyalar=true ise satışı olmayan kampanyalar da 0 adet ile listelenir
@@ -2524,6 +2525,8 @@ function hakedisPencereHesapla(
     $db, string $bas, string $bitisHaric, array $birimAdlari,
     string $outlet, string $satis, int $ay, int $yil, bool $tumKampanyalar = false
 ): array {
+    require_once dirname(__DIR__) . '/admin/includes/HakedisHesap.php';   // hakedisKademeApply
+
     $qp = [$bas, $bitisHaric];
     $durumFilter = '';
     if ($outlet !== '') { $durumFilter .= " AND r.IrisRapor_GuncelOutletDurum = ?"; $qp[] = $outlet; }
@@ -2563,13 +2566,14 @@ function hakedisPencereHesapla(
               {$durumFilter}
         ),
         bayiToplam AS (
-            SELECT Altbayi, COUNT(*) AS Toplam,
-                CASE WHEN COUNT(*) >= 2000 THEN 1
-                     WHEN COUNT(*) >= 1000 THEN 2
-                     WHEN COUNT(*) >= 500  THEN 3
-                     ELSE 4 END AS SkalaKodu
-            FROM uygun
-            GROUP BY Altbayi
+            -- Kademe bayinin skala setinden (HakedisHesap.php → hakedisKademeApply)
+            SELECT b.Altbayi, b.Toplam, kd.SkalaKodu, kd.SkalaAd
+            FROM (
+                SELECT Altbayi, COUNT(*) AS Toplam, MAX(AltBayiId) AS SetBayiId
+                FROM uygun
+                GROUP BY Altbayi
+            ) b
+            " . hakedisKademeApply('b.Toplam', 'b.SetBayiId', $yil, $ay) . "
         ),
         kampanyaAdet AS (
             SELECT
@@ -2600,7 +2604,7 @@ function hakedisPencereHesapla(
         )
         SELECT
             ka.Birim, ka.Altbayi, ka.AltBayiId, ka.KampanyaAdi, ka.Adet,
-            bt.Toplam, bt.SkalaKodu,
+            bt.Toplam, bt.SkalaKodu, bt.SkalaAd,
             (SELECT MAX(h.DigiturkHakedisTanimlari_Tutar)
                FROM dbo.DigiturkHakedisTanimlari h
                JOIN dbo.HakedisKampanyaTanimlari kt2
@@ -2626,7 +2630,8 @@ function hakedisPencereHesapla(
         if (!isset($bayiler[$bAd])) {
             $bayiler[$bAd] = [
                 'toplam'      => (int)$p['Toplam'],
-                'kademe'      => (int)$p['SkalaKodu'],
+                'kademe'      => $p['SkalaKodu'] !== null ? (int)$p['SkalaKodu'] : null,
+                'kademeAd'    => $p['SkalaAd'] !== null ? (string)$p['SkalaAd'] : null,
                 'altBayiId'   => $p['AltBayiId'] !== null ? (int)$p['AltBayiId'] : null,
                 'kampanyalar' => [],
                 'hakedis'     => 0.0,
@@ -2804,15 +2809,14 @@ function gorevHakedisGrubaBildir(array $params, $db): array
             . ' ₺ | Bakiye: ' . number_format($guncelBakiye, 0, ',', '.') . ' ₺');
 
         // ── Mesajı kur (düz WhatsApp metni; tutarlar kuruşsuz + binlik ayraçlı) ──
-        $fmt      = fn(float $v) => number_format(round($v), 0, ',', '.');
-        $SKALALAR = [1 => '2000+', 2 => '1000-2000', 3 => '500-1000', 4 => '0-500'];
+        $fmt = fn(float $v) => number_format(round($v), 0, ',', '.');
 
         // Bir hakediş bölümünü (bayi listesi + ara toplamlar + genel toplam) metne döker
-        $bolum = function (array $sonuc, string $toplamEtiketi) use ($fmt, $SKALALAR): string {
+        $bolum = function (array $sonuc, string $toplamEtiketi) use ($fmt): string {
             if (empty($sonuc['bayiler'])) return "\nBu dönemde eşleşen kampanya bulunamadı.\n";
             $t = '';
             foreach ($sonuc['bayiler'] as $bAd => $b) {
-                $t .= "\n🏪 *{$bAd}* (Kademe: " . ($SKALALAR[$b['kademe']] ?? '-') . ")\n";
+                $t .= "\n🏪 *{$bAd}* (Kademe: " . ($b['kademeAd'] ?? '-') . ")\n";
                 foreach ($b['kampanyalar'] as $kAd => $c) {
                     if ($c['birimTutar'] === null) {
                         $t .= "  • {$kAd}: {$c['adet']} adet (tutar tanımsız)\n";

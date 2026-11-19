@@ -4,10 +4,13 @@
  * Alt bayi bazında, dönem (ayın 4'ü - sonraki ayın 3'ü) için
  * Kampanya Tanımı x Adet Skalası matrisinde hakediş tutarları.
  * Kampanya satırları HakedisKampanyaTanimlari tablosundan (FK) gelir.
+ * Skala sütunları alt bayinin dönemdeki skala setinden gelir (HakedisAltBayiSkalaSetleri;
+ * ataması yoksa varsayılan set). Setler ve atamalar "Skala Setleri" modalından yönetilir.
  */
 
 require_once __DIR__ . '/../auth.php';
 require_once __DIR__ . '/../includes/PageAuth.php';
+require_once __DIR__ . '/../includes/HakedisHesap.php';   // hakedisBayiSkalaSetId, hakedisSetKademeleri
 requireAuth();
 
 $user = Auth::user();
@@ -37,7 +40,32 @@ $siteAyarlari = $db->fetchOne("SELECT TOP 1 site_ayarlari_site_title FROM dbo.ta
 $siteTitle    = $siteAyarlari['site_ayarlari_site_title'] ?? 'Örnek Yazılım Portal';
 
 // ── Sabit listeler ───────────────────────────────────────────────
-$SKALALAR = [1 => '2000 Adet ve Üzeri', 2 => '1000-2000 Arası', 3 => '500-1000 Arası', 4 => '0-500 Arası'];
+// Adet skalası: setler + kademeler (HakedisSkalaSetleri / HakedisSkalaKademeleri).
+// $SKALALAR = tüm kademelerin etiketi (liste/filtre); matris sütunları bayinin setinden gelir.
+$SKALA_SETLERI = [];   // [setId => ['ad', 'varsayilan', 'kademeler' => [id => ad]]]
+foreach ($db->fetchAll("
+    SELECT s.HakedisSkalaSetleri_id AS setId, s.HakedisSkalaSetleri_Ad AS setAd,
+           s.HakedisSkalaSetleri_Varsayilan AS varsayilan,
+           k.HakedisSkalaKademeleri_id AS id, k.HakedisSkalaKademeleri_Ad AS ad
+    FROM dbo.HakedisSkalaSetleri s
+    LEFT JOIN dbo.HakedisSkalaKademeleri k
+      ON k.HakedisSkalaKademeleri_Set_id = s.HakedisSkalaSetleri_id AND k.Durum = 1
+    WHERE s.Durum = 1
+    ORDER BY s.HakedisSkalaSetleri_Varsayilan DESC, s.HakedisSkalaSetleri_Ad, k.HakedisSkalaKademeleri_Sira
+") as $sk) {
+    $sid = (int)$sk['setId'];
+    if (!isset($SKALA_SETLERI[$sid])) {
+        $SKALA_SETLERI[$sid] = ['ad' => $sk['setAd'], 'varsayilan' => (bool)$sk['varsayilan'], 'kademeler' => []];
+    }
+    if ($sk['id'] !== null) $SKALA_SETLERI[$sid]['kademeler'][(int)$sk['id']] = $sk['ad'];
+}
+$SKALALAR = [];
+foreach ($db->fetchAll("SELECT HakedisSkalaKademeleri_id AS id, HakedisSkalaKademeleri_Ad AS ad FROM dbo.HakedisSkalaKademeleri") as $sk) {
+    $SKALALAR[(int)$sk['id']] = $sk['ad'];
+}
+$VARSAYILAN_SET_ID = null;
+foreach ($SKALA_SETLERI as $sid => $s) { if ($s['varsayilan']) { $VARSAYILAN_SET_ID = $sid; break; } }
+
 $AYLAR    = [1 => 'Ocak', 2 => 'Şubat', 3 => 'Mart', 4 => 'Nisan', 5 => 'Mayıs', 6 => 'Haziran',
              7 => 'Temmuz', 8 => 'Ağustos', 9 => 'Eylül', 10 => 'Ekim', 11 => 'Kasım', 12 => 'Aralık'];
 
@@ -240,37 +268,66 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 echo json_encode(['success' => true, 'data' => $list]);
                 break;
 
-            // Matris için mevcut dönem değerlerini getir
+            // Matris: bayinin dönemdeki skala seti (sütunlar) + tek ayda mevcut değerler
             case 'matris_get':
                 $altbayi = (int)($_POST['altbayi'] ?? 0);
                 $yil     = (int)($_POST['yil'] ?? 0);
-                $ay      = (int)($_POST['ay'] ?? 0);
+                $aylar   = $_POST['aylar'] ?? [];
+                if (!is_array($aylar)) $aylar = [$aylar];
+                $aylar = array_values(array_unique(array_filter(array_map('intval', $aylar), fn($a) => $a >= 1 && $a <= 12)));
+                sort($aylar);
 
-                if (!$altbayi || !$yil || !$ay) {
-                    echo json_encode(['success' => false, 'message' => 'Alt bayi, yıl ve ay seçilmelidir']);
+                if (!$yil || empty($aylar)) {
+                    echo json_encode(['success' => false, 'message' => 'Yıl ve ay seçilmelidir']);
                     break;
                 }
-                if (!$altBayiErisim($altbayi)) {
+                if ($altbayi && !$altBayiErisim($altbayi)) {
                     echo json_encode(['success' => false, 'message' => 'Bu alt bayi için yetkiniz yok']);
                     break;
                 }
 
-                $rows = $db->fetchAll("
-                    SELECT DigiturkHakedisTanimlari_KampanyaTanim_id AS k,
-                           DigiturkHakedisTanimlari_AdetSkalasiKodu AS s,
-                           DigiturkHakedisTanimlari_Tutar AS t
-                    FROM DigiturkHakedisTanimlari
-                    WHERE DigiturkHakedisTanimlari_AltBayi_id = ?
-                      AND DigiturkHakedisTanimlari_DonemYil = ?
-                      AND DigiturkHakedisTanimlari_DonemAy = ?
-                ", [$altbayi, $yil, $ay]);
+                // Her ayın seti; aylar farklı setlerdeyse matris tek seferde girilemez
+                $aySetleri = [];
+                foreach ($aylar as $a) $aySetleri[$a] = hakedisBayiSkalaSetId($db, $altbayi ?: null, $yil, $a);
+                $setIdler = array_values(array_unique(array_filter($aySetleri)));
+                if (count($setIdler) !== 1) {
+                    $detay = [];
+                    foreach ($aySetleri as $a => $sid) $detay[] = $AYLAR[$a] . ': ' . ($SKALA_SETLERI[$sid]['ad'] ?? 'set yok');
+                    echo json_encode([
+                        'success' => false, 'setFarkli' => true,
+                        'message' => 'Seçili aylar farklı skala setlerinde (' . implode(', ', $detay) . '). Ayları ayrı ayrı girin.',
+                    ], JSON_UNESCAPED_UNICODE);
+                    break;
+                }
+                $setId     = $setIdler[0];
+                $kademeler = hakedisSetKademeleri($db, $setId);
 
                 $matris = [];
-                foreach ($rows as $r) {
-                    $matris[$r['k']][$r['s']] = $r['t'];
+                $digerSet = 0;   // bu dönemde başka setin kademelerine yazılmış tanım sayısı
+                if ($altbayi && count($aylar) === 1) {
+                    $kIdler = array_column($kademeler, 'id');
+                    $rows = $db->fetchAll("
+                        SELECT DigiturkHakedisTanimlari_KampanyaTanim_id AS k,
+                               DigiturkHakedisTanimlari_AdetSkalasiKodu AS s,
+                               DigiturkHakedisTanimlari_Tutar AS t
+                        FROM DigiturkHakedisTanimlari
+                        WHERE DigiturkHakedisTanimlari_AltBayi_id = ?
+                          AND DigiturkHakedisTanimlari_DonemYil = ?
+                          AND DigiturkHakedisTanimlari_DonemAy = ?
+                    ", [$altbayi, $yil, $aylar[0]]);
+                    foreach ($rows as $r) {
+                        if (in_array((int)$r['s'], $kIdler, true)) $matris[$r['k']][$r['s']] = $r['t'];
+                        else $digerSet++;
+                    }
                 }
 
-                echo json_encode(['success' => true, 'data' => $matris]);
+                echo json_encode([
+                    'success'   => true,
+                    'data'      => $matris,
+                    'set'       => ['id' => $setId, 'ad' => $SKALA_SETLERI[$setId]['ad'] ?? '', 'varsayilan' => $setId === $VARSAYILAN_SET_ID],
+                    'kademeler' => $kademeler,
+                    'digerSet'  => $digerSet,
+                ], JSON_UNESCAPED_UNICODE);
                 break;
 
             // Matris kaydet (kampanya tanımı x skala upsert / boş hücre sil)
@@ -298,6 +355,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
                 if (!$altBayiErisim($altbayi)) {
                     echo json_encode(['success' => false, 'message' => 'Bu alt bayi için yetkiniz yok']);
+                    break;
+                }
+
+                // Kademeler bayinin dönemdeki setinden; tüm aylar aynı sette olmalı.
+                // Yalnız o setin kademelerine yazılır/silinir, başka setin kayıtlarına dokunulmaz.
+                $kaydetSetler = [];
+                foreach ($aylar as $a) $kaydetSetler[$a] = hakedisBayiSkalaSetId($db, $altbayi, $yil, $a);
+                $kaydetSetIdler = array_values(array_unique(array_filter($kaydetSetler)));
+                if (count($kaydetSetIdler) !== 1) {
+                    echo json_encode(['success' => false, 'message' => 'Seçili aylar farklı skala setlerinde. Ayları ayrı ayrı kaydedin.']);
+                    break;
+                }
+                $kaydetKademeler = array_column(hakedisSetKademeleri($db, $kaydetSetIdler[0]), 'id');
+                if (empty($kaydetKademeler)) {
+                    echo json_encode(['success' => false, 'message' => 'Bayinin skala setinde aktif kademe yok']);
                     break;
                 }
 
@@ -379,7 +451,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 foreach ($aylar as $ay) {
                     [$baslangic, $bitis] = donemTarihleri($yil, $ay);
                     foreach ($gecerliTanimlar as $tanimId) {
-                        foreach ([1, 2, 3, 4] as $s) {
+                        foreach ($kaydetKademeler as $s) {
                             $upsert($ay, $baslangic, $bitis, $tanimId, $s, $tutarlar[$tanimId][$s] ?? '');
                         }
                     }
@@ -582,6 +654,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     break;
                 }
 
+                // Grup tek kademe üretir → üyeler güncel dönemde aynı skala setinde olmalı
+                if (count($gelen) > 1) {
+                    $buYilG = (int)date('Y'); $buAyG = (int)date('n');
+                    $uyeSetleri = [];
+                    foreach ($gelen as $abId) {
+                        $uyeSetleri[hakedisBayiSkalaSetId($db, $abId, $buYilG, $buAyG) ?? 0][] = $abId;
+                    }
+                    if (count($uyeSetleri) > 1) {
+                        $parca = [];
+                        foreach ($uyeSetleri as $sid => $abler) {
+                            $parca[] = ($SKALA_SETLERI[$sid]['ad'] ?? 'set yok') . ' (' . count($abler) . ' bayi)';
+                        }
+                        echo json_encode([
+                            'success' => false,
+                            'message' => 'Grup üyeleri farklı skala setlerinde: ' . implode(', ', $parca)
+                                       . '. Önce Skala Setleri > Bayi Atamaları\'ndan aynı sete alın.',
+                        ], JSON_UNESCAPED_UNICODE);
+                        break;
+                    }
+                }
+
                 // Başka bir aktif grupta olan alt bayi eklenemez
                 if ($gelen) {
                     $ph = implode(',', array_fill(0, count($gelen), '?'));
@@ -690,6 +783,357 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     WHERE u.DigiturkAltBayiSkalaGrupUyeleri_AltBayi_id = ? AND u.Durum = 1 AND g.Durum = 1
                 ", [$abId]);
                 echo json_encode(['success' => true, 'data' => $bilgi ?: null], JSON_UNESCAPED_UNICODE);
+                break;
+
+            // ── Skala Setleri ─────────────────────────────────────────────
+            // Set = kademe listesi (AltSinir dahil, UstSinir hariç, NULL = sınırsız).
+            // Bayi → set ataması dönemden itibaren geçerli; ataması olmayan varsayılan seti kullanır.
+            case 'skala_setleri':
+                $setler = $db->fetchAll("
+                    SELECT s.HakedisSkalaSetleri_id AS id, s.HakedisSkalaSetleri_Ad AS ad,
+                           CAST(s.HakedisSkalaSetleri_Varsayilan AS INT) AS varsayilan,
+                           (SELECT COUNT(DISTINCT x.HakedisAltBayiSkalaSetleri_AltBayi_id)
+                              FROM dbo.HakedisAltBayiSkalaSetleri x
+                             WHERE x.HakedisAltBayiSkalaSetleri_Set_id = s.HakedisSkalaSetleri_id AND x.Durum = 1) AS atamaSayisi
+                    FROM dbo.HakedisSkalaSetleri s
+                    WHERE s.Durum = 1
+                    ORDER BY s.HakedisSkalaSetleri_Varsayilan DESC, s.HakedisSkalaSetleri_Ad
+                ");
+                $kademeRows = $db->fetchAll("
+                    SELECT k.HakedisSkalaKademeleri_Set_id AS setId, k.HakedisSkalaKademeleri_id AS id,
+                           k.HakedisSkalaKademeleri_Ad AS ad, k.HakedisSkalaKademeleri_AltSinir AS alt,
+                           k.HakedisSkalaKademeleri_UstSinir AS ust,
+                           (SELECT COUNT(*) FROM dbo.DigiturkHakedisTanimlari h
+                             WHERE h.DigiturkHakedisTanimlari_AdetSkalasiKodu = k.HakedisSkalaKademeleri_id) AS tanimSayisi
+                    FROM dbo.HakedisSkalaKademeleri k
+                    WHERE k.Durum = 1
+                    ORDER BY k.HakedisSkalaKademeleri_Sira
+                ");
+                foreach ($setler as &$st) {
+                    $st['kademeler'] = array_values(array_filter($kademeRows, fn($k) => (int)$k['setId'] === (int)$st['id']));
+                    $st['tanimSayisi'] = array_sum(array_map(fn($k) => (int)$k['tanimSayisi'], $st['kademeler']));
+                }
+                unset($st);
+                echo json_encode(['success' => true, 'data' => $setler], JSON_UNESCAPED_UNICODE);
+                break;
+
+            case 'skala_set_kaydet':
+                if (empty($permissions['is_admin'])) {
+                    echo json_encode(['success' => false, 'message' => 'Skala setlerini yalnız yönetici düzenleyebilir']);
+                    break;
+                }
+                $sid   = (int)($_POST['set_id'] ?? 0);
+                $setAd = mb_substr(trim((string)($_POST['ad'] ?? '')), 0, 100);
+                $gelenK = json_decode((string)($_POST['kademeler'] ?? '[]'), true);
+
+                if ($setAd === '') { echo json_encode(['success' => false, 'message' => 'Set adı zorunludur']); break; }
+                if (!is_array($gelenK) || !$gelenK) { echo json_encode(['success' => false, 'message' => 'En az bir kademe girilmelidir']); break; }
+
+                // Normalize + doğrula: 0'dan başlar, boşluksuz/çakışmasız ardışık, son kademe sınırsız
+                $kd = [];
+                foreach ($gelenK as $g) {
+                    $kAd  = mb_substr(trim((string)($g['ad'] ?? '')), 0, 100);
+                    $kAlt = (string)($g['alt'] ?? '') === '' ? null : (int)$g['alt'];
+                    $kUst = (string)($g['ust'] ?? '') === '' ? null : (int)$g['ust'];
+                    if ($kAd === '' || $kAlt === null || $kAlt < 0) {
+                        echo json_encode(['success' => false, 'message' => 'Her kademenin adı ve alt sınırı (0 veya üstü) dolu olmalı']);
+                        break 2;
+                    }
+                    if ($kUst !== null && $kUst <= $kAlt) {
+                        echo json_encode(['success' => false, 'message' => "\"$kAd\": üst sınır alt sınırdan büyük olmalı"], JSON_UNESCAPED_UNICODE);
+                        break 2;
+                    }
+                    $kd[] = ['id' => (int)($g['id'] ?? 0), 'ad' => $kAd, 'alt' => $kAlt, 'ust' => $kUst];
+                }
+                usort($kd, fn($a, $b) => $a['alt'] <=> $b['alt']);
+                if ($kd[0]['alt'] !== 0) { echo json_encode(['success' => false, 'message' => 'İlk kademe 0 adetten başlamalı']); break; }
+                for ($i = 0; $i < count($kd) - 1; $i++) {
+                    if ($kd[$i]['ust'] === null || $kd[$i]['ust'] !== $kd[$i + 1]['alt']) {
+                        echo json_encode([
+                            'success' => false,
+                            'message' => "\"{$kd[$i]['ad']}\" üst sınırı, sonraki kademenin (\"{$kd[$i + 1]['ad']}\") alt sınırına eşit olmalı (boşluk/çakışma var)",
+                        ], JSON_UNESCAPED_UNICODE);
+                        break 2;
+                    }
+                }
+                if ($kd[count($kd) - 1]['ust'] !== null) {
+                    echo json_encode(['success' => false, 'message' => 'En yüksek kademenin üst sınırı boş (sınırsız) olmalı']);
+                    break;
+                }
+                // Sira: en yüksek kademe 1 (eski düzenle aynı: 1 = 2000 ve üzeri)
+                $n = count($kd);
+                foreach ($kd as $i => &$k) $k['sira'] = $n - $i;
+                unset($k);
+
+                $ayniAd = $db->fetchOne("SELECT 1 AS v FROM dbo.HakedisSkalaSetleri WHERE HakedisSkalaSetleri_Ad = ? AND Durum = 1 AND HakedisSkalaSetleri_id <> ?", [$setAd, $sid]);
+                if ($ayniAd) { echo json_encode(['success' => false, 'message' => 'Bu adla aktif bir set zaten var']); break; }
+
+                $snow = date('Y-m-d H:i:s');
+                $uid  = $user['kullanici_id'];
+
+                if ($sid > 0) {
+                    $mevcutK = $db->fetchAll("
+                        SELECT k.HakedisSkalaKademeleri_id AS id, k.HakedisSkalaKademeleri_Ad AS ad,
+                               (SELECT COUNT(*) FROM dbo.DigiturkHakedisTanimlari h
+                                 WHERE h.DigiturkHakedisTanimlari_AdetSkalasiKodu = k.HakedisSkalaKademeleri_id) AS tanimSayisi
+                        FROM dbo.HakedisSkalaKademeleri k
+                        WHERE k.HakedisSkalaKademeleri_Set_id = ? AND k.Durum = 1
+                    ", [$sid]);
+                    if (!$db->fetchOne("SELECT 1 AS v FROM dbo.HakedisSkalaSetleri WHERE HakedisSkalaSetleri_id = ? AND Durum = 1", [$sid])) {
+                        echo json_encode(['success' => false, 'message' => 'Set bulunamadı']);
+                        break;
+                    }
+                    $mevcutIdler = array_map(fn($r) => (int)$r['id'], $mevcutK);
+                    foreach ($kd as $k) {
+                        if ($k['id'] && !in_array($k['id'], $mevcutIdler, true)) {
+                            echo json_encode(['success' => false, 'message' => 'Kademe bu sete ait değil']);
+                            break 2;
+                        }
+                    }
+                    // Çıkarılan kademe tanımda kullanılıyorsa silinemez
+                    $kalanIdler = array_filter(array_column($kd, 'id'));
+                    $kullanilan = array_filter($mevcutK, fn($r) => !in_array((int)$r['id'], $kalanIdler, true) && (int)$r['tanimSayisi'] > 0);
+                    if ($kullanilan) {
+                        $adlar = implode(', ', array_map(fn($r) => $r['ad'] . ' (' . $r['tanimSayisi'] . ' tanım)', $kullanilan));
+                        echo json_encode(['success' => false, 'message' => "Hakediş tanımı olan kademe çıkarılamaz: $adlar"], JSON_UNESCAPED_UNICODE);
+                        break;
+                    }
+                    foreach ($mevcutIdler as $mid) {
+                        if (in_array($mid, $kalanIdler, true)) continue;
+                        $db->update('HakedisSkalaKademeleri', ['Durum' => 0, 'GuncelleyenKullanici' => $uid, 'GuncellemeTarihi' => $snow],
+                                    ['HakedisSkalaKademeleri_id' => $mid]);
+                    }
+                    $db->update('HakedisSkalaSetleri', ['HakedisSkalaSetleri_Ad' => $setAd, 'GuncelleyenKullanici' => $uid, 'GuncellemeTarihi' => $snow],
+                                ['HakedisSkalaSetleri_id' => $sid]);
+                } else {
+                    $sid = (int)$db->insert('HakedisSkalaSetleri', [
+                        'HakedisSkalaSetleri_Ad'         => $setAd,
+                        'HakedisSkalaSetleri_Varsayilan' => 0,
+                        'OlusturanKullanici' => $uid, 'OlusturmaTarihi' => $snow,
+                        'GuncelleyenKullanici' => $uid, 'GuncellemeTarihi' => $snow, 'Durum' => 1,
+                    ]);
+                }
+
+                foreach ($kd as $k) {
+                    $alanlar = [
+                        'HakedisSkalaKademeleri_Ad'       => $k['ad'],
+                        'HakedisSkalaKademeleri_AltSinir' => $k['alt'],
+                        'HakedisSkalaKademeleri_UstSinir' => $k['ust'],
+                        'HakedisSkalaKademeleri_Sira'     => $k['sira'],
+                        'GuncelleyenKullanici' => $uid, 'GuncellemeTarihi' => $snow,
+                    ];
+                    if ($k['id']) {
+                        $db->update('HakedisSkalaKademeleri', $alanlar, ['HakedisSkalaKademeleri_id' => $k['id']]);
+                    } else {
+                        $db->insert('HakedisSkalaKademeleri', $alanlar + [
+                            'HakedisSkalaKademeleri_Set_id' => $sid,
+                            'OlusturanKullanici' => $uid, 'OlusturmaTarihi' => $snow, 'Durum' => 1,
+                        ]);
+                    }
+                }
+                echo json_encode(['success' => true, 'id' => $sid, 'message' => 'Skala seti kaydedildi']);
+                break;
+
+            // Varsayılan set: tek UPDATE ile (filtreli unique index ifade sonunda kontrol edilir)
+            case 'skala_set_varsayilan':
+                if (empty($permissions['is_admin'])) {
+                    echo json_encode(['success' => false, 'message' => 'Varsayılan seti yalnız yönetici değiştirebilir']);
+                    break;
+                }
+                $sid = (int)($_POST['set_id'] ?? 0);
+                if (!$db->fetchOne("SELECT 1 AS v FROM dbo.HakedisSkalaSetleri WHERE HakedisSkalaSetleri_id = ? AND Durum = 1", [$sid])) {
+                    echo json_encode(['success' => false, 'message' => 'Set bulunamadı']);
+                    break;
+                }
+                $ok = $db->execute("
+                    UPDATE dbo.HakedisSkalaSetleri
+                       SET HakedisSkalaSetleri_Varsayilan = CASE WHEN HakedisSkalaSetleri_id = ? THEN 1 ELSE 0 END,
+                           GuncelleyenKullanici = ?, GuncellemeTarihi = GETDATE()
+                     WHERE HakedisSkalaSetleri_Varsayilan = 1 OR HakedisSkalaSetleri_id = ?
+                ", [$sid, $user['kullanici_id'], $sid]);
+                echo json_encode(['success' => (bool)$ok, 'message' => $ok ? 'Varsayılan set değiştirildi' : 'Güncelleme hatası']);
+                break;
+
+            case 'skala_set_sil':
+                if (empty($permissions['is_admin'])) {
+                    echo json_encode(['success' => false, 'message' => 'Skala setlerini yalnız yönetici silebilir']);
+                    break;
+                }
+                $sid = (int)($_POST['set_id'] ?? 0);
+                $set = $db->fetchOne("SELECT HakedisSkalaSetleri_Varsayilan AS v FROM dbo.HakedisSkalaSetleri WHERE HakedisSkalaSetleri_id = ? AND Durum = 1", [$sid]);
+                if (!$set) { echo json_encode(['success' => false, 'message' => 'Set bulunamadı']); break; }
+                if ((int)$set['v'] === 1) { echo json_encode(['success' => false, 'message' => 'Varsayılan set silinemez']); break; }
+                $kullanim = $db->fetchOne("
+                    SELECT (SELECT COUNT(*) FROM dbo.HakedisAltBayiSkalaSetleri
+                             WHERE HakedisAltBayiSkalaSetleri_Set_id = ? AND Durum = 1) AS atama,
+                           (SELECT COUNT(*) FROM dbo.DigiturkHakedisTanimlari h
+                              JOIN dbo.HakedisSkalaKademeleri k ON k.HakedisSkalaKademeleri_id = h.DigiturkHakedisTanimlari_AdetSkalasiKodu
+                             WHERE k.HakedisSkalaKademeleri_Set_id = ?) AS tanim
+                ", [$sid, $sid]);
+                if ((int)$kullanim['atama'] > 0 || (int)$kullanim['tanim'] > 0) {
+                    echo json_encode(['success' => false, 'message' => "Set kullanımda ({$kullanim['atama']} bayi ataması, {$kullanim['tanim']} hakediş tanımı). Önce bunları kaldırın."]);
+                    break;
+                }
+                $snow = date('Y-m-d H:i:s');
+                $db->execute("UPDATE dbo.HakedisSkalaKademeleri SET Durum = 0, GuncelleyenKullanici = ?, GuncellemeTarihi = ? WHERE HakedisSkalaKademeleri_Set_id = ? AND Durum = 1",
+                             [$user['kullanici_id'], $snow, $sid]);
+                $db->update('HakedisSkalaSetleri', ['Durum' => 0, 'GuncelleyenKullanici' => $user['kullanici_id'], 'GuncellemeTarihi' => $snow],
+                            ['HakedisSkalaSetleri_id' => $sid]);
+                echo json_encode(['success' => true, 'message' => 'Set silindi']);
+                break;
+
+            // ── Bayi → Set atamaları ──────────────────────────────────────
+            case 'skala_atamalari':
+                $aWhere = 'x.Durum = 1';
+                $aParams = [];
+                if ($birimKisitli) {
+                    if (empty($izinliAltBayiIdleri)) { echo json_encode(['success' => true, 'data' => []]); break; }
+                    $aWhere .= ' AND x.HakedisAltBayiSkalaSetleri_AltBayi_id IN (' . implode(',', array_fill(0, count($izinliAltBayiIdleri), '?')) . ')';
+                    $aParams = $izinliAltBayiIdleri;
+                }
+                $atamalar = $db->fetchAll("
+                    SELECT x.HakedisAltBayiSkalaSetleri_id AS id,
+                           x.HakedisAltBayiSkalaSetleri_AltBayi_id AS altbayiId,
+                           CASE WHEN an.DigiturkAnaBayiler_Ad IS NULL THEN a.DigiturkAltBayiler_Ad
+                                ELSE an.DigiturkAnaBayiler_Ad + N' — ' + a.DigiturkAltBayiler_Ad END AS altbayi,
+                           x.HakedisAltBayiSkalaSetleri_Set_id AS setId, s.HakedisSkalaSetleri_Ad AS setAd,
+                           x.HakedisAltBayiSkalaSetleri_BaslangicYil AS yil, x.HakedisAltBayiSkalaSetleri_BaslangicAy AS ay,
+                           g.DigiturkAltBayiSkalaGruplari_Ad AS grupAd
+                    FROM dbo.HakedisAltBayiSkalaSetleri x
+                    JOIN dbo.HakedisSkalaSetleri s ON s.HakedisSkalaSetleri_id = x.HakedisAltBayiSkalaSetleri_Set_id
+                    LEFT JOIN DigiturkAltBayiler a ON a.DigiturkAltBayiler_Id = x.HakedisAltBayiSkalaSetleri_AltBayi_id
+                    LEFT JOIN DigiturkAnaBayiler an ON an.DigiturkAnaBayiler_Id = a.DigiturkAltBayiler_AnaBayiId
+                    OUTER APPLY (
+                        SELECT TOP 1 gg.DigiturkAltBayiSkalaGruplari_Ad
+                        FROM DigiturkAltBayiSkalaGrupUyeleri gu
+                        JOIN DigiturkAltBayiSkalaGruplari gg ON gg.DigiturkAltBayiSkalaGruplari_id = gu.DigiturkAltBayiSkalaGrupUyeleri_Grup_id AND gg.Durum = 1
+                        WHERE gu.DigiturkAltBayiSkalaGrupUyeleri_AltBayi_id = x.HakedisAltBayiSkalaSetleri_AltBayi_id AND gu.Durum = 1
+                    ) g
+                    WHERE $aWhere
+                    ORDER BY altbayi, x.HakedisAltBayiSkalaSetleri_BaslangicYil DESC, x.HakedisAltBayiSkalaSetleri_BaslangicAy DESC
+                ", $aParams);
+                echo json_encode(['success' => true, 'data' => $atamalar], JSON_UNESCAPED_UNICODE);
+                break;
+
+            // Atama ekle/güncelle. Bayi bir skala grubundaysa grubun tüm üyelerine uygulanır.
+            case 'skala_atama_kaydet':
+                if (!$permissions['can_add'] && !$permissions['can_edit']) {
+                    echo json_encode(['success' => false, 'message' => 'Kayıt yetkiniz yok!']);
+                    break;
+                }
+                $abId = (int)($_POST['altbayi'] ?? 0);
+                $sid  = (int)($_POST['set_id'] ?? 0);
+                $aYil = (int)($_POST['yil'] ?? 0);
+                $aAy  = (int)($_POST['ay'] ?? 0);
+                if (!$abId || !$sid || $aYil < 2000 || $aYil > 2100 || $aAy < 1 || $aAy > 12) {
+                    echo json_encode(['success' => false, 'message' => 'Alt bayi, set, yıl ve ay seçilmelidir']);
+                    break;
+                }
+                if (!$db->fetchOne("SELECT 1 AS v FROM dbo.HakedisSkalaSetleri WHERE HakedisSkalaSetleri_id = ? AND Durum = 1", [$sid])) {
+                    echo json_encode(['success' => false, 'message' => 'Set bulunamadı']);
+                    break;
+                }
+                $grup = $db->fetchOne("
+                    SELECT gu.DigiturkAltBayiSkalaGrupUyeleri_Grup_id AS id, gg.DigiturkAltBayiSkalaGruplari_Ad AS ad
+                    FROM DigiturkAltBayiSkalaGrupUyeleri gu
+                    JOIN DigiturkAltBayiSkalaGruplari gg ON gg.DigiturkAltBayiSkalaGruplari_id = gu.DigiturkAltBayiSkalaGrupUyeleri_Grup_id AND gg.Durum = 1
+                    WHERE gu.DigiturkAltBayiSkalaGrupUyeleri_AltBayi_id = ? AND gu.Durum = 1
+                ", [$abId]);
+                $hedefler = [$abId];
+                if ($grup) {
+                    $hedefler = array_map(fn($r) => (int)$r['id'], $db->fetchAll("
+                        SELECT DigiturkAltBayiSkalaGrupUyeleri_AltBayi_id AS id FROM DigiturkAltBayiSkalaGrupUyeleri
+                        WHERE DigiturkAltBayiSkalaGrupUyeleri_Grup_id = ? AND Durum = 1
+                    ", [(int)$grup['id']]));
+                }
+                foreach ($hedefler as $h) {
+                    if (!$altBayiErisim($h)) {
+                        echo json_encode(['success' => false, 'message' => 'Bu alt bayi (veya skala grubundaki bir üye) için yetkiniz yok']);
+                        break 2;
+                    }
+                }
+
+                $anow = date('Y-m-d H:i:s');
+                $uid  = $user['kullanici_id'];
+                foreach ($hedefler as $h) {
+                    $var = $db->fetchOne("
+                        SELECT HakedisAltBayiSkalaSetleri_id AS id FROM dbo.HakedisAltBayiSkalaSetleri
+                        WHERE HakedisAltBayiSkalaSetleri_AltBayi_id = ? AND HakedisAltBayiSkalaSetleri_BaslangicYil = ?
+                          AND HakedisAltBayiSkalaSetleri_BaslangicAy = ? AND Durum = 1
+                    ", [$h, $aYil, $aAy]);
+                    if ($var) {
+                        $db->update('HakedisAltBayiSkalaSetleri', ['HakedisAltBayiSkalaSetleri_Set_id' => $sid, 'GuncelleyenKullanici' => $uid, 'GuncellemeTarihi' => $anow],
+                                    ['HakedisAltBayiSkalaSetleri_id' => (int)$var['id']]);
+                    } else {
+                        $db->insert('HakedisAltBayiSkalaSetleri', [
+                            'HakedisAltBayiSkalaSetleri_AltBayi_id'   => $h,
+                            'HakedisAltBayiSkalaSetleri_Set_id'       => $sid,
+                            'HakedisAltBayiSkalaSetleri_BaslangicYil' => $aYil,
+                            'HakedisAltBayiSkalaSetleri_BaslangicAy'  => $aAy,
+                            'OlusturanKullanici' => $uid, 'OlusturmaTarihi' => $anow,
+                            'GuncelleyenKullanici' => $uid, 'GuncellemeTarihi' => $anow, 'Durum' => 1,
+                        ]);
+                    }
+                }
+
+                // Uyarı: başlangıçtan sonraki dönemlerde yeni setin dışındaki kademelere yazılmış tanımlar
+                $phH = implode(',', array_fill(0, count($hedefler), '?'));
+                $eskiTanim = $db->fetchOne("
+                    SELECT COUNT(*) AS c FROM dbo.DigiturkHakedisTanimlari h
+                    JOIN dbo.HakedisSkalaKademeleri k ON k.HakedisSkalaKademeleri_id = h.DigiturkHakedisTanimlari_AdetSkalasiKodu
+                    WHERE h.DigiturkHakedisTanimlari_AltBayi_id IN ($phH)
+                      AND h.DigiturkHakedisTanimlari_DonemYil * 100 + h.DigiturkHakedisTanimlari_DonemAy >= ?
+                      AND k.HakedisSkalaKademeleri_Set_id <> ?
+                ", array_merge($hedefler, [$aYil * 100 + $aAy, $sid]));
+                $mesaj = 'Atama kaydedildi' . ($grup ? " ({$grup['ad']} grubunun " . count($hedefler) . ' üyesine uygulandı)' : '');
+                echo json_encode([
+                    'success'   => true,
+                    'message'   => $mesaj,
+                    'eskiTanim' => (int)($eskiTanim['c'] ?? 0),
+                ], JSON_UNESCAPED_UNICODE);
+                break;
+
+            case 'skala_atama_sil':
+                if (!$permissions['can_delete']) {
+                    echo json_encode(['success' => false, 'message' => 'Silme yetkiniz yok!']);
+                    break;
+                }
+                $atId = (int)($_POST['atama_id'] ?? 0);
+                $at = $db->fetchOne("
+                    SELECT HakedisAltBayiSkalaSetleri_AltBayi_id AS ab, HakedisAltBayiSkalaSetleri_BaslangicYil AS yil,
+                           HakedisAltBayiSkalaSetleri_BaslangicAy AS ay
+                    FROM dbo.HakedisAltBayiSkalaSetleri WHERE HakedisAltBayiSkalaSetleri_id = ? AND Durum = 1
+                ", [$atId]);
+                if (!$at || !$altBayiErisim((int)$at['ab'])) {
+                    echo json_encode(['success' => false, 'message' => 'Atama bulunamadı veya yetkiniz yok']);
+                    break;
+                }
+                // Gruptaysa aynı dönemli atama tüm üyelerden kalkar (grup tek sette kalsın)
+                $hedefler = [(int)$at['ab']];
+                $grupId = $db->fetchOne("
+                    SELECT gu.DigiturkAltBayiSkalaGrupUyeleri_Grup_id AS id FROM DigiturkAltBayiSkalaGrupUyeleri gu
+                    JOIN DigiturkAltBayiSkalaGruplari gg ON gg.DigiturkAltBayiSkalaGruplari_id = gu.DigiturkAltBayiSkalaGrupUyeleri_Grup_id AND gg.Durum = 1
+                    WHERE gu.DigiturkAltBayiSkalaGrupUyeleri_AltBayi_id = ? AND gu.Durum = 1
+                ", [(int)$at['ab']]);
+                if ($grupId) {
+                    $hedefler = array_map(fn($r) => (int)$r['id'], $db->fetchAll("
+                        SELECT DigiturkAltBayiSkalaGrupUyeleri_AltBayi_id AS id FROM DigiturkAltBayiSkalaGrupUyeleri
+                        WHERE DigiturkAltBayiSkalaGrupUyeleri_Grup_id = ? AND Durum = 1
+                    ", [(int)$grupId['id']]));
+                    foreach ($hedefler as $h) {
+                        if (!$altBayiErisim($h)) {
+                            echo json_encode(['success' => false, 'message' => 'Skala grubundaki bir üye için yetkiniz yok']);
+                            break 2;
+                        }
+                    }
+                }
+                $phH = implode(',', array_fill(0, count($hedefler), '?'));
+                $db->execute("
+                    UPDATE dbo.HakedisAltBayiSkalaSetleri SET Durum = 0, GuncelleyenKullanici = ?, GuncellemeTarihi = GETDATE()
+                    WHERE Durum = 1 AND HakedisAltBayiSkalaSetleri_BaslangicYil = ? AND HakedisAltBayiSkalaSetleri_BaslangicAy = ?
+                      AND HakedisAltBayiSkalaSetleri_AltBayi_id IN ($phH)
+                ", array_merge([$user['kullanici_id'], (int)$at['yil'], (int)$at['ay']], $hedefler));
+                echo json_encode(['success' => true, 'message' => 'Atama kaldırıldı' . (count($hedefler) > 1 ? ' (' . count($hedefler) . ' grup üyesi)' : '')]);
                 break;
 
             // Tek kayıt sil
@@ -813,6 +1257,9 @@ $yillar = range($buYil + 1, $buYil - 3);
                     <div class="card-header">
                         <h3 class="card-title"><i class="bi bi-grid-3x3-gap"></i> Hakediş Girişi</h3>
                         <div class="card-tools">
+                            <button type="button" class="btn btn-sm btn-outline-secondary me-1" id="btnSkalaModal">
+                                <i class="bi bi-sliders"></i> Skala Setleri
+                            </button>
                             <button type="button" class="btn btn-sm btn-outline-primary me-1" id="btnGrupModal">
                                 <i class="bi bi-diagram-3"></i> Alt Bayi Eşleştirme
                             </button>
@@ -844,44 +1291,13 @@ $yillar = range($buYil + 1, $buYil - 3);
                         </div>
 
                         <div class="alert alert-primary py-2 px-3 small" id="m_grup_bilgi" style="display:none"></div>
+                        <div class="alert py-2 px-3 small" id="m_set_bilgi" style="display:none"></div>
 
+                        <!-- Sütunlar (kademeler) bayinin dönemdeki skala setinden JS ile çizilir (renderMatris) -->
                         <div class="table-responsive">
                             <table class="table table-bordered matris-table mb-0">
-                                <thead class="table-light">
-                                    <tr>
-                                        <th class="matris-corner">Kampanya \ Skala</th>
-                                        <?php foreach ($SKALALAR as $sk => $sad): ?>
-                                            <th><?= htmlspecialchars($sad) ?></th>
-                                        <?php endforeach; ?>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    <?php if (empty($KAMPANYA_TANIMLARI)): ?>
-                                    <tr>
-                                        <td colspan="<?= count($SKALALAR) + 1 ?>" class="text-center text-muted py-3">
-                                            <i class="bi bi-info-circle"></i>
-                                            Aktif kampanya tanımı yok. Önce
-                                            <a href="hakedis-kampanya-tanimlama.php">Hakediş Kampanya Tanımlama</a>
-                                            sayfasından kampanya ekleyin.
-                                        </td>
-                                    </tr>
-                                    <?php else: foreach ($KAMPANYA_TANIMLARI as $kt): ?>
-                                    <tr>
-                                        <th class="matris-corner text-start"><?= htmlspecialchars($kt['ad']) ?></th>
-                                        <?php foreach ($SKALALAR as $sk => $sad): ?>
-                                        <td>
-                                            <div class="input-group input-group-sm">
-                                                <input type="number" step="0.01" min="0"
-                                                       class="form-control matris-input"
-                                                       data-k="<?= $kt['id'] ?>" data-s="<?= $sk ?>"
-                                                       placeholder="0,00">
-                                                <span class="input-group-text">₺</span>
-                                            </div>
-                                        </td>
-                                        <?php endforeach; ?>
-                                    </tr>
-                                    <?php endforeach; endif; ?>
-                                </tbody>
+                                <thead class="table-light" id="matrisHead"></thead>
+                                <tbody id="matrisBody"></tbody>
                             </table>
                         </div>
                     </div>
@@ -934,7 +1350,11 @@ $yillar = range($buYil + 1, $buYil - 3);
                                     <label class="form-label">Adet Skalası</label>
                                     <select class="form-select select2" name="skala" id="filter_skala">
                                         <option value="">Tümü</option>
-                                        <?php foreach ($SKALALAR as $sk => $sad): ?><option value="<?= $sk ?>"><?= htmlspecialchars($sad) ?></option><?php endforeach; ?>
+                                        <?php foreach ($SKALA_SETLERI as $st): ?>
+                                        <optgroup label="<?= htmlspecialchars($st['ad']) ?>">
+                                            <?php foreach ($st['kademeler'] as $sk => $sad): ?><option value="<?= $sk ?>"><?= htmlspecialchars($sad) ?></option><?php endforeach; ?>
+                                        </optgroup>
+                                        <?php endforeach; ?>
                                     </select>
                                 </div>
                                 <div class="col-md-2">
@@ -1030,22 +1450,8 @@ $yillar = range($buYil + 1, $buYil - 3);
                 </div>
 
                 <div class="table-responsive mb-3">
-                    <table class="table table-bordered table-sm text-center align-middle small mb-1">
-                        <thead class="table-light">
-                            <tr>
-                                <th class="bg-light"></th>
-                                <?php foreach ($SKALALAR as $sad): ?><th><?= htmlspecialchars($sad) ?></th><?php endforeach; ?>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <?php foreach ($KAMPANYA_TANIMLARI as $kt): ?>
-                            <tr>
-                                <th class="table-light text-start"><?= htmlspecialchars($kt['ad']) ?></th>
-                                <?php foreach ($SKALALAR as $s): ?><td class="text-muted">0,00</td><?php endforeach; ?>
-                            </tr>
-                            <?php endforeach; ?>
-                        </tbody>
-                    </table>
+                    <!-- Örnek: matrisin o anki skala setine göre JS ile çizilir (excelHedefGuncelle) -->
+                    <table class="table table-bordered table-sm text-center align-middle small mb-1" id="excelOrnekTablo"></table>
                     <span class="text-muted small">Beklenen format (örnek):</span>
                 </div>
 
@@ -1162,6 +1568,147 @@ $yillar = range($buYil + 1, $buYil - 3);
     </div>
 </div>
 
+<!-- Skala Setleri Modal -->
+<div class="modal fade" id="skalaModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="bi bi-sliders text-secondary"></i> Skala Setleri</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <ul class="nav nav-tabs mb-3" role="tablist">
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tabSetler" type="button" role="tab">
+                            <i class="bi bi-collection"></i> Setler
+                        </button>
+                    </li>
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tabAtamalar" type="button" role="tab">
+                            <i class="bi bi-shop"></i> Bayi Atamaları
+                        </button>
+                    </li>
+                </ul>
+
+                <div class="tab-content">
+                    <!-- Setler -->
+                    <div class="tab-pane fade show active" id="tabSetler" role="tabpanel">
+                        <div class="alert alert-info py-2 px-3 small mb-3">
+                            <i class="bi bi-info-circle"></i>
+                            Ataması olmayan alt bayiler <strong>varsayılan</strong> seti kullanır.
+                            Alt sınır <strong>dahil</strong>, üst sınır <strong>hariç</strong>tir
+                            (ör. 0-30 → 0..29). En yüksek kademenin üst sınırı boş bırakılır (sınırsız).
+                        </div>
+                        <div class="row g-3">
+                            <div class="col-lg-5">
+                                <div class="card card-outline card-secondary mb-0">
+                                    <div class="card-header py-2">
+                                        <h3 class="card-title fs-6 mb-0"><i class="bi bi-collection"></i> Setler</h3>
+                                        <div class="card-tools">
+                                            <button type="button" class="btn btn-sm btn-outline-secondary skala-admin" id="btnSetYeni">
+                                                <i class="bi bi-plus-lg"></i> Yeni Set
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <div class="card-body p-0">
+                                        <div class="list-group list-group-flush" id="setListesi">
+                                            <div class="list-group-item text-muted small">Yükleniyor...</div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-lg-7">
+                                <div class="card card-outline card-success mb-0">
+                                    <div class="card-header py-2">
+                                        <h3 class="card-title fs-6 mb-0"><i class="bi bi-pencil-square"></i> <span id="setDetayBaslik">Set Seçiniz</span></h3>
+                                    </div>
+                                    <div class="card-body" id="setDetayBody" style="display:none">
+                                        <input type="hidden" id="s_id">
+                                        <div class="mb-3">
+                                            <label class="form-label" for="s_ad">Set Adı <span class="text-danger">*</span></label>
+                                            <input type="text" class="form-control" id="s_ad" maxlength="100" placeholder="Örn: Yeni Sistem (0-30-60)">
+                                        </div>
+                                        <div class="alert alert-warning py-2 px-3 small" id="s_kullanimUyari" style="display:none"></div>
+                                        <table class="table table-sm table-bordered align-middle mb-2">
+                                            <thead class="table-light">
+                                                <tr>
+                                                    <th>Kademe Adı</th>
+                                                    <th style="width:120px">Alt Sınır</th>
+                                                    <th style="width:120px">Üst Sınır</th>
+                                                    <th style="width:50px"></th>
+                                                </tr>
+                                            </thead>
+                                            <tbody id="kademeSatirlari"></tbody>
+                                        </table>
+                                        <div class="d-flex justify-content-between">
+                                            <button type="button" class="btn btn-sm btn-outline-secondary skala-admin" id="btnKademeEkle">
+                                                <i class="bi bi-plus-lg"></i> Kademe Ekle
+                                            </button>
+                                            <button type="button" class="btn btn-sm btn-success skala-admin" id="btnSetKaydet">
+                                                <i class="bi bi-save"></i> Seti Kaydet
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <div class="card-body text-muted small" id="setDetayBos">
+                                        Soldaki listeden bir set seçin veya <strong>Yeni Set</strong> ile oluşturun.
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Bayi Atamaları -->
+                    <div class="tab-pane fade" id="tabAtamalar" role="tabpanel">
+                        <div class="alert alert-info py-2 px-3 small mb-3">
+                            <i class="bi bi-info-circle"></i>
+                            Atama, seçilen dönemden <strong>itibaren</strong> geçerlidir; önceki dönemler eski setle kalır.
+                            Alt bayi bir skala grubundaysa atama grubun <strong>tüm üyelerine</strong> uygulanır.
+                        </div>
+                        <div class="row g-2 align-items-end mb-3">
+                            <div class="col-md-4">
+                                <label class="form-label" for="a_altbayi">Alt Bayi <span class="text-danger">*</span></label>
+                                <select class="form-select" id="a_altbayi"></select>
+                            </div>
+                            <div class="col-md-3">
+                                <label class="form-label" for="a_set">Skala Seti <span class="text-danger">*</span></label>
+                                <select class="form-select" id="a_set"></select>
+                            </div>
+                            <div class="col-md-2">
+                                <label class="form-label" for="a_yil">Başlangıç Yılı</label>
+                                <select class="form-select" id="a_yil"></select>
+                            </div>
+                            <div class="col-md-2">
+                                <label class="form-label" for="a_ay">Başlangıç Ayı</label>
+                                <select class="form-select" id="a_ay"></select>
+                            </div>
+                            <div class="col-md-1 d-grid">
+                                <button type="button" class="btn btn-success" id="btnAtamaKaydet" title="Atamayı Kaydet"><i class="bi bi-save"></i></button>
+                            </div>
+                        </div>
+                        <table class="table table-sm table-bordered table-striped align-middle mb-0">
+                            <thead class="table-light">
+                                <tr>
+                                    <th>Alt Bayi</th>
+                                    <th>Skala Seti</th>
+                                    <th>Başlangıç</th>
+                                    <th>Skala Grubu</th>
+                                    <th style="width:60px"></th>
+                                </tr>
+                            </thead>
+                            <tbody id="atamaSatirlari">
+                                <tr><td colspan="5" class="text-muted small">Yükleniyor...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal"><i class="bi bi-x-circle"></i> Kapat</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <script src="https://code.jquery.com/jquery-3.7.0.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@popperjs/core@2.11.8/dist/umd/popper.min.js" crossorigin="anonymous"></script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.7/dist/js/bootstrap.min.js" crossorigin="anonymous"></script>
@@ -1177,10 +1724,16 @@ $yillar = range($buYil + 1, $buYil - 3);
     const permissions = {
         canAdd:    <?= $permissions['can_add']    ? 'true' : 'false' ?>,
         canEdit:   <?= $permissions['can_edit']   ? 'true' : 'false' ?>,
-        canDelete: <?= $permissions['can_delete'] ? 'true' : 'false' ?>
+        canDelete: <?= $permissions['can_delete'] ? 'true' : 'false' ?>,
+        isAdmin:   <?= !empty($permissions['is_admin']) ? 'true' : 'false' ?>
     };
 
-    const SKALALAR = <?= json_encode($SKALALAR, JSON_UNESCAPED_UNICODE) ?>;
+    // Tüm kademe etiketleri (liste/filtre); Skala Setleri modalında değişince güncellenir
+    let SKALALAR = <?= json_encode((object)$SKALALAR, JSON_UNESCAPED_UNICODE) ?>;
+    // Matris sütunları: seçili bayinin dönemdeki setinden (matrisGetir). İlk çizim varsayılan setle.
+    let MATRIS_KADEMELER = <?= json_encode(
+        $VARSAYILAN_SET_ID ? hakedisSetKademeleri($db, $VARSAYILAN_SET_ID) : [], JSON_UNESCAPED_UNICODE) ?>;
+    let matrisIstekNo = 0;
     const AYLAR    = <?= json_encode($AYLAR, JSON_UNESCAPED_UNICODE) ?>;
     // Kampanya tanımları: [{id, ad}]  +  id → ad haritası
     const KAMPANYA_TANIMLARI = <?= json_encode($KAMPANYA_TANIMLARI, JSON_UNESCAPED_UNICODE) ?>;
@@ -1189,10 +1742,12 @@ $yillar = range($buYil + 1, $buYil - 3);
 
     let dataTable, tutarModal, grupModal, currentFilters = {};
     let ALT_BAYILER = [], GRUPLAR = [];
+    let skalaModal, SETLER = [], skalaDegisti = false;
 
     $(document).ready(function () {
         tutarModal = new bootstrap.Modal(document.getElementById('tutarModal'));
         grupModal  = new bootstrap.Modal(document.getElementById('grupModal'));
+        skalaModal = new bootstrap.Modal(document.getElementById('skalaModal'));
 
         dataTable = $('#kayitTable').DataTable({
             language: { url: '//cdn.datatables.net/plug-ins/1.13.6/i18n/tr.json' },
@@ -1205,6 +1760,7 @@ $yillar = range($buYil + 1, $buYil - 3);
         // Statik filtre select'leri (.form-select) custom.js tarafından otomatik
         // Select2 yapılıyor — burada tekrar init ETME (çift init hayalet dropdown yapar).
 
+        renderMatris(MATRIS_KADEMELER);
         initDonemSelect();
         loadAltBayiler();
         loadStats();
@@ -1249,6 +1805,20 @@ $yillar = range($buYil + 1, $buYil - 3);
             tutarKaydet();
         });
 
+        $('#btnSkalaModal').on('click', skalaModalAc);
+        $('#btnSetYeni').on('click', setYeni);
+        $('#btnKademeEkle').on('click', () => kademeSatirEkle({}));
+        $('#btnSetKaydet').on('click', setKaydet);
+        $('#btnAtamaKaydet').on('click', atamaKaydet);
+        $('#kademeSatirlari').on('click', '.kademe-sil', function () { $(this).closest('tr').remove(); });
+        // Modal kapanınca matris sütunları / liste etiketleri yeni setlerle tazelensin
+        $('#skalaModal').on('hidden.bs.modal', function () {
+            if (!skalaDegisti) return;
+            skalaDegisti = false;
+            matrisGetir();
+            loadList();
+        });
+
         $('#btnGrupModal').on('click', grupModalAc);
         $('#btnGrupYeni').on('click', grupYeni);
         $('#btnGrupKaydet').on('click', grupKaydet);
@@ -1270,6 +1840,12 @@ $yillar = range($buYil + 1, $buYil - 3);
             const ayAd = aylar.map(a => AYLAR[a]).join(', ');
             $('#excelHedefText').text(`${abAd} · ${ayAd} ${yil}`);
         }
+        // Beklenen format: matrisin o anki kademeleri
+        const bas = '<thead class="table-light"><tr><th class="bg-light"></th>'
+            + MATRIS_KADEMELER.map(k => `<th>${escapeHtml(k.ad)}</th>`).join('') + '</tr></thead>';
+        const govde = KAMPANYA_TANIMLARI.map(kt => `<tr><th class="table-light text-start">${escapeHtml(kt.ad)}</th>`
+            + MATRIS_KADEMELER.map(() => '<td class="text-muted">0,00</td>').join('') + '</tr>').join('');
+        $('#excelOrnekTablo').html(bas + '<tbody>' + govde + '</tbody>');
     }
 
     // ── Excel yükleme ─────────────────────────────────────────────
@@ -1296,13 +1872,13 @@ $yillar = range($buYil + 1, $buYil - 3);
     }
 
     function ornekExcelIndir() {
-        const skl = Object.values(SKALALAR);
+        const skl = MATRIS_KADEMELER.map(k => k.ad);
         const aoa = [['Kampanya \\ Skala', ...skl]];
         KAMPANYA_TANIMLARI.forEach(k => {
-            aoa.push([k.ad, 0, 0, 0, 0]);
+            aoa.push([k.ad, ...skl.map(() => 0)]);
         });
         const ws = XLSX.utils.aoa_to_sheet(aoa);
-        ws['!cols'] = [{ wch: 22 }, { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 16 }];
+        ws['!cols'] = [{ wch: 22 }, ...skl.map(() => ({ wch: 18 }))];
         const wb = XLSX.utils.book_new();
         XLSX.utils.book_append_sheet(wb, ws, 'Hakedis');
         XLSX.writeFile(wb, 'hakedis-ornek.xlsx');
@@ -1329,9 +1905,10 @@ $yillar = range($buYil + 1, $buYil - 3);
 
                 // Başlık satırı → skala sütunlarını isimle eşle
                 const baslik = rows[0].map(norm);
-                const skalaKodlari = Object.keys(SKALALAR);        // ['1','2','3','4']
+                // Sütunlar matrisin o anki setinin kademeleriyle eşlenir (isimle, yoksa sırayla)
+                const skalaKodlari = MATRIS_KADEMELER.map(k => String(k.id));
                 const skalaNormMap = {};                            // normAd → kod
-                skalaKodlari.forEach(k => skalaNormMap[norm(SKALALAR[k])] = k);
+                MATRIS_KADEMELER.forEach(k => skalaNormMap[norm(k.ad)] = String(k.id));
                 // Kampanya tanımı: normAd → id
                 const kampNormMap = {};
                 KAMPANYA_TANIMLARI.forEach(k => kampNormMap[norm(k.ad)] = k.id);
@@ -1453,17 +2030,56 @@ $yillar = range($buYil + 1, $buYil - 3);
         }
     }
 
+    // Matris: satır = kampanya tanımı, sütun = kademe (bayinin setinden)
+    function renderMatris(kademeler) {
+        MATRIS_KADEMELER = kademeler || [];
+        $('#matrisHead').html('<tr><th class="matris-corner">Kampanya \\ Skala</th>'
+            + MATRIS_KADEMELER.map(k => `<th>${escapeHtml(k.ad)}</th>`).join('') + '</tr>');
+
+        if (!KAMPANYA_TANIMLARI.length) {
+            $('#matrisBody').html(`<tr><td colspan="${MATRIS_KADEMELER.length + 1}" class="text-center text-muted py-3">
+                <i class="bi bi-info-circle"></i> Aktif kampanya tanımı yok. Önce
+                <a href="hakedis-kampanya-tanimlama.php">Hakediş Kampanya Tanımlama</a> sayfasından kampanya ekleyin.</td></tr>`);
+            return;
+        }
+        $('#matrisBody').html(KAMPANYA_TANIMLARI.map(kt =>
+            `<tr><th class="matris-corner text-start">${escapeHtml(kt.ad)}</th>` +
+            MATRIS_KADEMELER.map(k => `<td>
+                <div class="input-group input-group-sm">
+                    <input type="number" step="0.01" min="0" class="form-control matris-input"
+                           data-k="${kt.id}" data-s="${k.id}" placeholder="0,00">
+                    <span class="input-group-text">₺</span>
+                </div></td>`).join('') + '</tr>').join(''));
+    }
+
     function matrisGetir() {
-        const altbayi = $('#m_altbayi').val();
+        const altbayi = $('#m_altbayi').val() || '';
         const yil = $('#m_yil').val();
         const aylar = $('#m_ay').val() || [];
         $('.matris-input').val('');
-        // Yalnızca tek ay seçiliyse mevcut değerleri yükle (çoklu seçimde belirsiz)
-        if (!altbayi || !yil || aylar.length !== 1) return;
+        if (!yil || aylar.length === 0) { $('#m_set_bilgi').hide(); return; }
 
-        $.post('', { action: 'matris_get', altbayi, yil, ay: aylar[0] }, function (r) {
-            if (!r.success || !r.data) return;
-            for (const k in r.data) {
+        // Set (sütunlar) her seçimde çözülür; değerler yalnız tek ayda yüklenir (çoklu seçimde belirsiz)
+        const no = ++matrisIstekNo;
+        $.post('', { action: 'matris_get', altbayi, yil, aylar }, function (r) {
+            if (no !== matrisIstekNo) return;   // eski yanıt
+            const $bilgi = $('#m_set_bilgi');
+            if (!r.success) {
+                $bilgi.removeClass('alert-secondary alert-warning').addClass('alert-danger')
+                      .html(`<i class="bi bi-exclamation-octagon"></i> ${escapeHtml(r.message)}`).show();
+                return;
+            }
+            renderMatris(r.kademeler);
+            let html = `<i class="bi bi-sliders"></i> Skala seti: <strong>${escapeHtml(r.set.ad)}</strong>`
+                     + (r.set.varsayilan ? ' <span class="badge bg-secondary">varsayılan</span>' : ' <span class="badge bg-primary">atama</span>');
+            if (r.digerSet > 0) {
+                html += `<br><i class="bi bi-exclamation-triangle"></i> Bu dönemde başka bir setin kademelerine yazılmış
+                         <strong>${r.digerSet}</strong> tanım var; hesaplamada kullanılmaz. Listeden silebilirsiniz.`;
+            }
+            $bilgi.removeClass('alert-danger alert-secondary alert-warning')
+                  .addClass(r.digerSet > 0 ? 'alert-warning' : 'alert-secondary').html(html).show();
+
+            for (const k in (r.data || {})) {
                 for (const s in r.data[k]) {
                     $(`.matris-input[data-k="${k}"][data-s="${s}"]`).val(parseFloat(r.data[k][s]));
                 }
@@ -1758,6 +2374,235 @@ $yillar = range($buYil + 1, $buYil - 3);
                 `grubunda (${r.data.uyeSayisi} alt bayi). Skala kademesi grup toplam adedinden hesaplanır.`
             ).show();
         }, 'json');
+    }
+
+    // ── Skala Setleri ─────────────────────────────────────────────
+    function skalaModalAc() {
+        $('.skala-admin').toggle(permissions.isAdmin);
+        setDetayGizle();
+        atamaFormHazirla();
+        loadSetler();
+        loadAtamalar();
+        skalaModal.show();
+    }
+
+    function setDetayGizle() {
+        $('#setDetayBody').hide();
+        $('#setDetayBos').show();
+        $('#setDetayBaslik').text('Set Seçiniz');
+    }
+
+    function loadSetler(seciliId) {
+        $.post('', { action: 'skala_setleri' }, function (r) {
+            if (!r.success) { showToast('Skala setleri yüklenemedi', 'error'); return; }
+            SETLER = r.data || [];
+
+            // Etiket haritası + liste filtresi tazelenir (yeni kademeler)
+            SETLER.forEach(s => s.kademeler.forEach(k => SKALALAR[k.id] = k.ad));
+            const filtreOpts = '<option value="">Tümü</option>' + SETLER.map(s =>
+                `<optgroup label="${escapeHtml(s.ad)}">` +
+                s.kademeler.map(k => `<option value="${k.id}">${escapeHtml(k.ad)}</option>`).join('') + '</optgroup>').join('');
+            const filtreSecili = $('#filter_skala').val();
+            rebuildSelect2($('#filter_skala'), filtreOpts, { theme: 'bootstrap-5', width: '100%' });
+            $('#filter_skala').val(filtreSecili).trigger('change.select2');
+
+            // Atama formundaki set listesi
+            const setSecili = $('#a_set').val();
+            rebuildSelect2($('#a_set'), '<option value="">Seçiniz...</option>' + SETLER.map(s =>
+                `<option value="${s.id}">${escapeHtml(s.ad)}${s.varsayilan == 1 ? ' (varsayılan)' : ''}</option>`).join(''),
+                { theme: 'bootstrap-5', width: '100%', dropdownParent: $('#skalaModal') });
+            if (setSecili) $('#a_set').val(setSecili).trigger('change.select2');
+
+            const $liste = $('#setListesi');
+            if (!SETLER.length) { $liste.html('<div class="list-group-item text-muted small">Henüz set yok.</div>'); return; }
+            $liste.html(SETLER.map(s => {
+                const ozet = s.kademeler.map(k => escapeHtml(k.ad)).join(' · ') || '<span class="text-muted">Kademe yok</span>';
+                const varsayilan = s.varsayilan == 1;
+                const sw = `<div class="form-check form-switch mb-0" title="Varsayılan set">
+                        <input class="form-check-input set-varsayilan" type="checkbox" role="switch"
+                               id="set_vars_${s.id}" data-id="${s.id}" value="1" ${varsayilan ? 'checked' : ''}
+                               ${(!permissions.isAdmin || varsayilan) ? 'disabled' : ''}>
+                        <label class="form-check-label small" for="set_vars_${s.id}">Varsayılan</label>
+                    </div>`;
+                const silBtn = (permissions.isAdmin && !varsayilan)
+                    ? `<button class="btn btn-sm btn-outline-danger ms-2 set-sil" data-id="${s.id}" title="Seti Sil"><i class="bi bi-trash"></i></button>` : '';
+                return `<div class="list-group-item list-group-item-action set-satir" data-id="${s.id}" style="cursor:pointer">
+                        <div class="d-flex justify-content-between align-items-start">
+                            <div class="me-2">
+                                <div class="fw-semibold">${escapeHtml(s.ad)}
+                                    <span class="badge bg-secondary ms-1">${s.atamaSayisi} bayi</span>
+                                    <span class="badge bg-light text-dark ms-1">${s.tanimSayisi} tanım</span>
+                                </div>
+                                <div class="small text-muted">${ozet}</div>
+                            </div>
+                            <div class="d-flex align-items-center text-nowrap">${sw}${silBtn}</div>
+                        </div>
+                    </div>`;
+            }).join(''));
+
+            $('.set-satir').on('click', function (e) {
+                if ($(e.target).closest('.form-check, .set-sil').length) return;
+                setSec($(this).data('id'));
+            });
+            $('.set-varsayilan').on('change', function () { setVarsayilanYap($(this).data('id'), this); });
+            $('.set-sil').on('click', function (e) { e.stopPropagation(); setSil($(this).data('id')); });
+            if (seciliId) setSec(seciliId);
+        }, 'json');
+    }
+
+    function kademeSatirEkle(k) {
+        const kilit = !permissions.isAdmin ? 'disabled' : '';
+        $('#kademeSatirlari').append(`<tr data-id="${k.id || ''}">
+            <td><input type="text" class="form-control form-control-sm k-ad" maxlength="100" value="${escapeHtml(k.ad || '')}" placeholder="Örn: 0-30 Arası" ${kilit}></td>
+            <td><input type="number" min="0" step="1" class="form-control form-control-sm k-alt" value="${k.alt ?? ''}" ${kilit}></td>
+            <td><input type="number" min="1" step="1" class="form-control form-control-sm k-ust" value="${k.ust ?? ''}" placeholder="sınırsız" ${kilit}></td>
+            <td class="text-center">${permissions.isAdmin ? '<button type="button" class="btn btn-sm btn-outline-danger kademe-sil" title="Kademeyi Çıkar"><i class="bi bi-x-lg"></i></button>' : ''}</td>
+        </tr>`);
+    }
+
+    function setSec(id) {
+        const s = SETLER.find(x => String(x.id) === String(id));
+        if (!s) return;
+        $('.set-satir').removeClass('active');
+        $(`.set-satir[data-id="${id}"]`).addClass('active');
+        $('#s_id').val(s.id);
+        $('#s_ad').val(s.ad).prop('disabled', !permissions.isAdmin);
+        $('#kademeSatirlari').empty();
+        // Düzenleme alttan üste (0 → sınırsız) daha okunaklı
+        [...s.kademeler].sort((a, b) => a.alt - b.alt).forEach(kademeSatirEkle);
+        const uyari = [];
+        if (s.varsayilan == 1) uyari.push('Bu <strong>varsayılan</strong> set: sınır değişikliği ataması olmayan tüm bayileri etkiler.');
+        if (s.tanimSayisi > 0) uyari.push(`Bu setin kademelerinde <strong>${s.tanimSayisi}</strong> hakediş tanımı var: sınır değişikliği eski dönem hesaplarını da değiştirir.`);
+        $('#s_kullanimUyari').html(uyari.map(u => `<i class="bi bi-exclamation-triangle"></i> ${u}`).join('<br>')).toggle(uyari.length > 0);
+        $('#setDetayBaslik').text('Set Düzenle');
+        $('#setDetayBos').hide();
+        $('#setDetayBody').show();
+    }
+
+    function setYeni() {
+        $('.set-satir').removeClass('active');
+        $('#s_id').val('');
+        $('#s_ad').val('').prop('disabled', false);
+        $('#kademeSatirlari').empty();
+        kademeSatirEkle({ alt: 0 });
+        $('#s_kullanimUyari').hide();
+        $('#setDetayBaslik').text('Yeni Set');
+        $('#setDetayBos').hide();
+        $('#setDetayBody').show();
+        setTimeout(() => $('#s_ad').trigger('focus'), 200);
+    }
+
+    function setKaydet() {
+        const ad = $('#s_ad').val().trim();
+        if (!ad) { showToast('Set adı zorunludur', 'warning'); return; }
+        const kademeler = $('#kademeSatirlari tr').map(function () {
+            return {
+                id:  $(this).data('id') || 0,
+                ad:  $(this).find('.k-ad').val().trim(),
+                alt: $(this).find('.k-alt').val(),
+                ust: $(this).find('.k-ust').val()
+            };
+        }).get();
+        if (!kademeler.length) { showToast('En az bir kademe ekleyin', 'warning'); return; }
+
+        const gonder = function () {
+            const $btn = $('#btnSetKaydet').prop('disabled', true);
+            $.post('', { action: 'skala_set_kaydet', set_id: $('#s_id').val() || 0, ad, kademeler: JSON.stringify(kademeler) }, function (r) {
+                if (r.success) { showToast(r.message, 'success'); skalaDegisti = true; loadSetler(r.id); }
+                else showError('Hata!', r.message);
+            }, 'json').always(() => $btn.prop('disabled', false));
+        };
+        const s = SETLER.find(x => String(x.id) === String($('#s_id').val()));
+        if (s && (s.tanimSayisi > 0 || s.varsayilan == 1)) {
+            confirmAction('Kullanımdaki set değiştirilecek', 'Sınır değişikliği bu seti kullanan tüm dönemlerin hesabını etkiler. Devam edilsin mi?', gonder);
+        } else {
+            gonder();
+        }
+    }
+
+    function setVarsayilanYap(id, el) {
+        const s = SETLER.find(x => String(x.id) === String(id));
+        el.checked = false;   // onaydan sonra liste yenilenince doğru durum gelir
+        confirmAction(
+            `"${s ? s.ad : ''}" varsayılan set yapılsın mı?`,
+            'Ataması olmayan TÜM alt bayilerin kademesi (eski dönemler dahil) bu setten hesaplanır.',
+            function () {
+                $.post('', { action: 'skala_set_varsayilan', set_id: id }, function (r) {
+                    if (r.success) { showToast(r.message, 'success'); skalaDegisti = true; loadSetler(); }
+                    else showError('Hata!', r.message);
+                }, 'json');
+            }
+        );
+    }
+
+    function setSil(id) {
+        confirmAction('Bu seti silmek istediğinize emin misiniz?', 'Yalnız atama ve hakediş tanımı olmayan set silinebilir.', function () {
+            $.post('', { action: 'skala_set_sil', set_id: id }, function (r) {
+                if (r.success) { showSuccess('Silindi!', r.message); skalaDegisti = true; loadSetler(); setDetayGizle(); }
+                else showError('Hata!', r.message);
+            }, 'json');
+        });
+    }
+
+    function atamaFormHazirla() {
+        const modalOpt = { theme: 'bootstrap-5', width: '100%', dropdownParent: $('#skalaModal') };
+        rebuildSelect2($('#a_altbayi'), '<option value="">Seçiniz...</option>' + ALT_BAYILER.map(b =>
+            `<option value="${b.DigiturkAltBayiler_Id}">${escapeHtml(b.Etiket)}</option>`).join(''), modalOpt);
+        // Varsayılan başlangıç: matristeki yıl / ilk ay
+        const yil = parseInt($('#m_yil').val()) || new Date().getFullYear();
+        const ay  = ($('#m_ay').val() || []).map(Number).sort((a, b) => a - b)[0] || (new Date().getMonth() + 1);
+        let yilOpts = '';
+        for (let y = new Date().getFullYear() + 1; y >= new Date().getFullYear() - 3; y--) {
+            yilOpts += `<option value="${y}" ${y === yil ? 'selected' : ''}>${y}</option>`;
+        }
+        rebuildSelect2($('#a_yil'), yilOpts, modalOpt);
+        rebuildSelect2($('#a_ay'), Object.keys(AYLAR).map(no =>
+            `<option value="${no}" ${parseInt(no) === ay ? 'selected' : ''}>${AYLAR[no]}</option>`).join(''), modalOpt);
+    }
+
+    function loadAtamalar() {
+        $.post('', { action: 'skala_atamalari' }, function (r) {
+            const $tb = $('#atamaSatirlari');
+            if (!r.success) { $tb.html('<tr><td colspan="5" class="text-danger small">Atamalar yüklenemedi</td></tr>'); return; }
+            if (!r.data.length) {
+                $tb.html('<tr><td colspan="5" class="text-muted small">Atama yok — tüm alt bayiler varsayılan seti kullanıyor.</td></tr>');
+                return;
+            }
+            $tb.html(r.data.map(a => `<tr>
+                <td>${escapeHtml(a.altbayi || ('#' + a.altbayiId))}</td>
+                <td><span class="skala-badge">${escapeHtml(a.setAd)}</span></td>
+                <td><span class="donem-badge">${AYLAR[a.ay]} ${a.yil}</span> ve sonrası</td>
+                <td>${a.grupAd ? escapeHtml(a.grupAd) : '<span class="text-muted">-</span>'}</td>
+                <td class="text-center">${permissions.canDelete
+                    ? `<button class="btn btn-sm btn-outline-danger" onclick="atamaSil(${a.id})" title="Atamayı Kaldır"><i class="bi bi-trash"></i></button>` : ''}</td>
+            </tr>`).join(''));
+        }, 'json');
+    }
+
+    function atamaKaydet() {
+        const veri = { action: 'skala_atama_kaydet', altbayi: $('#a_altbayi').val(), set_id: $('#a_set').val(), yil: $('#a_yil').val(), ay: $('#a_ay').val() };
+        if (!veri.altbayi || !veri.set_id) { showToast('Alt bayi ve skala seti seçiniz', 'warning'); return; }
+        const $btn = $('#btnAtamaKaydet').prop('disabled', true);
+        $.post('', veri, function (r) {
+            if (!r.success) { showError('Hata!', r.message); return; }
+            skalaDegisti = true;
+            loadAtamalar(); loadSetler();
+            if (r.eskiTanim > 0) {
+                showWarning('Atama kaydedildi', `${r.message}. Başlangıç döneminden sonra eski setin kademelerine yazılmış ${r.eskiTanim} tanım var; `
+                    + 'bu dönemlerin matrisini yeni kademelerle yeniden girin.');
+            } else {
+                showToast(r.message, 'success');
+            }
+        }, 'json').always(() => $btn.prop('disabled', false));
+    }
+
+    function atamaSil(id) {
+        confirmAction('Atama kaldırılsın mı?', 'Bayi o dönemden itibaren önceki atamasına veya varsayılan sete döner.', function () {
+            $.post('', { action: 'skala_atama_sil', atama_id: id }, function (r) {
+                if (r.success) { showToast(r.message, 'success'); skalaDegisti = true; loadAtamalar(); loadSetler(); }
+                else showError('Hata!', r.message);
+            }, 'json');
+        });
     }
 
     function deleteRecord(id) {

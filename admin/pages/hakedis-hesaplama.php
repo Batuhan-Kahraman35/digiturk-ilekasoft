@@ -12,7 +12,8 @@
  *  - Kampanya eşleşmesi: IrisRapor_TalepTuru = _TalepTuru AND IrisRapor_MemoKodu = _MemoKodu
  *      AND (_Kampanya IS NULL OR IrisRapor_Kampanya = _Kampanya). Aynı ada sahip kayıtlar ada göre gruplanır.
  *  - Kampanya adedi: eşleşen uygun kayıt sayısı (COUNT).
- *  - Skala kademesi: alt bayinin dönemdeki TÜM uygun kayıt sayısına göre (2000+/1000-2000/500-1000/0-500).
+ *  - Skala kademesi: alt bayinin dönemdeki TÜM uygun kayıt sayısına göre, bayinin skala setinden
+ *    (HakedisSkalaKademeleri; HakedisAltBayiSkalaSetleri ataması yoksa varsayılan set).
  *    Alt bayi bir skala grubuna üyeyse (hakedis-tanimlama > Alt Bayi Eşleştirme) grup üyelerinin
  *    adetleri toplanır ve kademe bu toplamdan bulunur; fiyat yine bayinin kendi tanımından okunur.
  *  - Hakediş: kampanya_adedi × (alt bayi + dönem + kampanya + kademe) tutarı (DigiturkHakedisTanimlari).
@@ -65,7 +66,11 @@ $ODEME_TURLERI = $db->fetchAll("
 ");
 
 // ── Sabit listeler ──────────────────────────────────────────────────
-$SKALALAR = [1 => '2000 Adet ve Üzeri', 2 => '1000-2000 Arası', 3 => '500-1000 Arası', 4 => '0-500 Arası'];
+// Kademe etiketleri DB'den (tüm setler; satır kendi kademeAd'ını da taşır)
+$SKALALAR = [];
+foreach ($db->fetchAll("SELECT HakedisSkalaKademeleri_id AS id, HakedisSkalaKademeleri_Ad AS ad FROM dbo.HakedisSkalaKademeleri") as $sk) {
+    $SKALALAR[(int)$sk['id']] = $sk['ad'];
+}
 $AYLAR    = [1 => 'Ocak', 2 => 'Şubat', 3 => 'Mart', 4 => 'Nisan', 5 => 'Mayıs', 6 => 'Haziran',
              7 => 'Temmuz', 8 => 'Ağustos', 9 => 'Eylül', 10 => 'Ekim', 11 => 'Kasım', 12 => 'Aralık'];
 
@@ -165,6 +170,47 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     ORDER BY IrisRapor_SatisDurumu
                 ");
                 echo json_encode(['success' => true, 'outlet' => $outlet, 'satis' => $satis], JSON_UNESCAPED_UNICODE);
+                break;
+
+            // Personel filtresi seçenekleri: seçili dönem(ler)de satış giren personeller (IrisRapor_TalebiGirenPersonel).
+            // Alt bayi seçiliyse o bayinin personelleri; kısıtlı kullanıcıya yalnız izinli birimlerin bayileri.
+            case 'personeller':
+                $yil   = (int)($_POST['yil'] ?? 0);
+                $aylar = $_POST['ay'] ?? [];
+                if (!is_array($aylar)) $aylar = [$aylar];
+                $aylar = array_values(array_filter(array_map('intval', $aylar), fn($a) => $a >= 1 && $a <= 12));
+                $abId  = (int)($_POST['altbayi'] ?? 0);
+                if (!$yil || !$aylar) { echo json_encode(['success' => true, 'data' => []]); break; }
+                if ($birimKisitli && empty($izinliBirimIdleri)) { echo json_encode(['success' => true, 'data' => []]); break; }
+
+                // Dönem penceresi: en erken ayın başı → en geç ayın sonu (formül; tanım farkı listeyi daraltmaz)
+                sort($aylar);
+                [$pBas] = donemTarihleri($yil, $aylar[0]);
+                [, $pBit] = donemTarihleri($yil, end($aylar));
+                $pBas = date('Y-m-d', strtotime($pBas . ' -7 days'));
+                $pBit = date('Y-m-d', strtotime($pBit . ' +7 days'));
+
+                $pWhere  = "r.IrisRapor_MemoKapanisTarihi >= ? AND r.IrisRapor_MemoKapanisTarihi < DATEADD(DAY, 1, ?)
+                            AND ISNULL(r.IrisRapor_TalebiGirenPersonel, N'') <> N''";
+                $pParams = [$pBas, $pBit];
+                if ($abId) { $pWhere .= " AND ab.altbayiId = ?"; $pParams[] = $abId; }
+                if ($birimKisitli) {
+                    $pWhere .= " AND EXISTS (SELECT 1 FROM KullaniciBirimYetkileri kby
+                                  WHERE kby.KullaniciBirimYetkileri_AltBayi_id = ab.altbayiId AND kby.Durum = 1
+                                    AND kby.KullaniciBirimYetkileri_Birim_id IN (" . implode(',', array_fill(0, count($izinliBirimIdleri), '?')) . "))";
+                    foreach ($izinliBirimIdleri as $bid) $pParams[] = $bid;
+                }
+                $list = $db->fetchAll("
+                    SELECT r.IrisRapor_TalebiGirenPersonel AS ad,
+                           ISNULL(MAX(ab.altbayiAd), N'') AS altbayi,
+                           COUNT(*) AS adet
+                    FROM dbo.DigiturkIrisRapor r
+                    " . hakedisAltBayiApply() . "
+                    WHERE $pWhere
+                    GROUP BY r.IrisRapor_TalebiGirenPersonel
+                    ORDER BY r.IrisRapor_TalebiGirenPersonel
+                ", $pParams);
+                echo json_encode(['success' => true, 'data' => $list], JSON_UNESCAPED_UNICODE);
                 break;
 
             // Tek dönem tarih aralığı (tanım varsa tanımdan, yoksa formül) — inputları otomatik doldurmak için
@@ -436,7 +482,7 @@ $KAMPANYALAR = $db->fetchAll("
                     <div class="card-body">
                         <form id="hesapForm">
                             <div class="row g-3 align-items-end">
-                                <div class="col-md-3">
+                                <div class="col-md-2">
                                     <label class="form-label">Birim</label>
                                     <select class="form-select" name="birim" id="h_birim"><option value="">Tümü</option></select>
                                 </div>
@@ -445,10 +491,14 @@ $KAMPANYALAR = $db->fetchAll("
                                     <select class="form-select" name="altbayi" id="h_altbayi"><option value="">Tümü</option></select>
                                 </div>
                                 <div class="col-md-3">
+                                    <label class="form-label">Personel <small class="text-muted">(çoklu)</small></label>
+                                    <select class="form-select" name="personel[]" id="h_personel" multiple></select>
+                                </div>
+                                <div class="col-md-2">
                                     <label class="form-label">Outlet Durumu</label>
                                     <select class="form-select" name="outlet" id="h_outlet"><option value="">Tümü</option></select>
                                 </div>
-                                <div class="col-md-3">
+                                <div class="col-md-2">
                                     <label class="form-label">Satış Durumu</label>
                                     <select class="form-select" name="satis" id="h_satis"><option value="">Tümü</option></select>
                                 </div>
@@ -652,11 +702,14 @@ $KAMPANYALAR = $db->fetchAll("
         loadAltBayiler();
         updateDonemText();
         loadDonemTarih();
+        loadPersoneller();
 
         $('#h_yil, #h_ay').on('change', function () {
             updateDonemText();
             loadDonemTarih();
+            loadPersoneller();
         });
+        $('#h_altbayi').on('change', loadPersoneller);
 
         $('#h_birim').on('change', function () {
             if ($('#h_yil').val() && ($('#h_ay').val() || []).length) hesapla();
@@ -687,10 +740,7 @@ $KAMPANYALAR = $db->fetchAll("
     function odemeFiltre() {
         const f = $('#hesapForm').serializeArray();
         const d = { action: 'odeme_onizle', odeme_turu_id: $('#o_turu').val(), tarih: $('#o_tarih').val() };
-        f.forEach(x => {
-            if (x.name === 'ay[]') { (d['ay'] = d['ay'] || []).push(x.value); }
-            else { d[x.name] = x.value; }
-        });
+        formDiziyeEkle(f, d);
         return d;
     }
 
@@ -828,10 +878,7 @@ $KAMPANYALAR = $db->fetchAll("
         $btn.prop('disabled', true).html('<span class="spinner-border spinner-border-sm"></span> Hazırlanıyor...');
 
         const d = { action: 'iris_kayitlar' };
-        $('#hesapForm').serializeArray().forEach(x => {
-            if (x.name === 'ay[]') { (d['ay'] = d['ay'] || []).push(x.value); }
-            else { d[x.name] = x.value; }
-        });
+        formDiziyeEkle($('#hesapForm').serializeArray(), d);
 
         $.post('', d, function (r) {
             $btn.prop('disabled', false).html(eskiHtml);
@@ -859,6 +906,38 @@ $KAMPANYALAR = $db->fetchAll("
             $btn.prop('disabled', false).html(eskiHtml);
             showToast('Excel verisi alınamadı', 'error');
         });
+    }
+
+    // serializeArray → POST verisi; "ad[]" alanları (ay[], personel[]) diziye toplanır
+    function formDiziyeEkle(alanlar, d) {
+        alanlar.forEach(x => {
+            if (x.name.endsWith('[]')) { const k = x.name.slice(0, -2); (d[k] = d[k] || []).push(x.value); }
+            else { d[x.name] = x.value; }
+        });
+        return d;
+    }
+
+    // Personel seçenekleri: seçili dönem + alt bayiye göre; listede kalan seçimler korunur
+    let personelIstekNo = 0;
+    function loadPersoneller() {
+        const yil = $('#h_yil').val(), aylar = $('#h_ay').val() || [];
+        const secili = $('#h_personel').val() || [];
+        const no = ++personelIstekNo;
+        $.post('', { action: 'personeller', yil, ay: aylar, altbayi: $('#h_altbayi').val() || '' }, function (r) {
+            if (no !== personelIstekNo || !r.success) return;
+            const opts = r.data.map(p => {
+                const etiket = p.ad + (p.altbayi ? ` (${p.altbayi})` : '') + ` · ${p.adet}`;
+                return `<option value="${escapeHtml(p.ad)}">${escapeHtml(etiket)}</option>`;
+            }).join('');
+            const $el = $('#h_personel');
+            if ($el.hasClass('select2-hidden-accessible')) {
+                try { $el.select2('close'); } catch (e) {}
+                try { $el.select2('destroy'); } catch (e) {}
+            }
+            $el.html(opts).select2({ theme: 'bootstrap-5', width: '100%', placeholder: 'Tümü', closeOnSelect: false, allowClear: true });
+            const varOlan = r.data.map(p => p.ad);
+            $el.val(secili.filter(s => varOlan.includes(s))).trigger('change.select2');
+        }, 'json');
     }
 
     // Aynı elemana ikinci kez select2 uygulanmasını (hayalet dropdown) engeller
@@ -967,7 +1046,8 @@ $KAMPANYALAR = $db->fetchAll("
     function hesapla() {
         const yil = $('#h_yil').val(), aylar = $('#h_ay').val() || [],
               altbayi = $('#h_altbayi').val(), birim = $('#h_birim').val(),
-              outlet = $('#h_outlet').val(), satis = $('#h_satis').val();
+              outlet = $('#h_outlet').val(), satis = $('#h_satis').val(),
+              personel = $('#h_personel').val() || [];
         if (!yil || aylar.length === 0) { showToast('Yıl ve en az bir ay seçiniz', 'warning'); return; }
 
         const bas = (aylar.length === 1 && !$('#h_bas').prop('disabled')) ? ($('#h_bas').val() || '') : '';
@@ -977,7 +1057,7 @@ $KAMPANYALAR = $db->fetchAll("
         $btn.prop('disabled', true).html('<i class="bi bi-hourglass-split"></i> Hesaplanıyor...');
 
         $.ajax({
-            url: '', method: 'POST', data: { action: 'hesapla', yil, ay: aylar, altbayi, birim, outlet, satis, bas, bit }, dataType: 'json',
+            url: '', method: 'POST', data: { action: 'hesapla', yil, ay: aylar, altbayi, birim, outlet, satis, personel, bas, bit }, dataType: 'json',
             success: function (r) {
                 if (r.success) {
                     sonRows = r.data;
@@ -1008,7 +1088,7 @@ $KAMPANYALAR = $db->fetchAll("
         dataTable.clear();
         rows.forEach(row => {
             // Kademe grup havuzundan geldiyse rozetin yanında grup adı + grup toplamı görünür
-            const kademe = `<span class="skala-badge">${escapeHtml(SKALALAR[row.kademe] || '-')}</span>`
+            const kademe = `<span class="skala-badge">${escapeHtml(row.kademeAd || SKALALAR[row.kademe] || '-')}</span>`
                 + (row.grupAd
                     ? ` <span class="grup-badge" title="Skala kademesi '${escapeHtml(row.grupAd)}' grubunun toplam ${row.grupToplam} adedinden hesaplandı"><i class="bi bi-diagram-3"></i> ${escapeHtml(row.grupAd)} · ${row.grupToplam}</span>`
                     : '');
