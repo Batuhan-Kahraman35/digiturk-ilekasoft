@@ -1584,7 +1584,7 @@ function satisBasiMaliyet(array $reklam, array $onay): array
 /**
  * Bayi günlük raporu için PNG görsel üretir; ham PNG verisi döndürür.
  */
-function bayiRaporGorselCiz(array $satis, array $kurulum, array $onay, array $voip, string $tarih, ?string $raporTarihi, ?string $donem = null): string
+function bayiRaporGorselCiz(array $satis, array $kurulum, array $onay, array $voip, string $tarih, ?string $raporTarihi, ?string $donem = null, string $grupBaslik = 'BAYİ İSMİ'): string
 {
     // $donem verilirse (tarih aralığı raporu) başlıklardaki "GÜNLÜK" kalkar, dönem alt bilgiye yazılır
     $bp = $donem ? 'BAYİ ' : 'BAYİ GÜNLÜK ';
@@ -1607,7 +1607,7 @@ function bayiRaporGorselCiz(array $satis, array $kurulum, array $onay, array $vo
 
     // 5 kolonlu tablo tanımları (SATIŞ / KURULUM / ONAY)
     $cols5W = [300, 80, 80, 88, 112]; // toplam = $colW (660)
-    $cols5L = ['BAYİ İSMİ', 'ISP', 'NEO', 'UYDU', 'TV TOPLAM'];
+    $cols5L = [$grupBaslik, 'ISP', 'NEO', 'UYDU', 'TV TOPLAM'];
     $cols5A = ['L', 'C', 'C', 'C', 'C'];
     $cols5K = ['bayi', 'isp', 'neo', 'uydu', 'toplam'];
 
@@ -1710,7 +1710,9 @@ function bayiRaporGorselCiz(array $satis, array $kurulum, array $onay, array $vo
 /**
  * WhatsApp Rapor Bildirim görevi.
  * params: tarih (d.m.Y), bitis (d.m.Y, opsiyonel — verilirse tarih..bitis aralık raporu),
- *         telefon (virgüllü liste), saat_bas (0-23), saat_bitis (0-23)
+ *         telefon (virgüllü liste), saat_bas (0-23), saat_bitis (0-23),
+ *         ana_bayiler (opsiyonel; DigiturkAnaBayiler_Id virgüllü, "*" = tüm aktif, boş = filtre yok),
+ *         gruplama (opsiyonel; boş/"birim" = alt bayi adı, "personel" = talebi giren personel)
  */
 function gorevWhatsappRaporBildir(array $params, $db): array
 {
@@ -1758,68 +1760,73 @@ function gorevWhatsappRaporBildir(array $params, $db): array
             return ['durum' => 2, 'sonuc' => 'Alıcı listesi boş.', 'cikti' => ob_get_clean()];
         }
 
-        // Pivot sorgular (bayi-gunluk-rapor.php ile birebir aynı)
-        $satis = $db->fetchAll("
+        // Ana bayi filtresi (opsiyonel): boş = tüm kayıtlar, "*" = tüm aktif ana bayiler, "1,4" = seçilenler.
+        // IRIS satırı ana bayiye talebi giren bayi kodu (IrisRapor_TalebiGirenBayiKodu) ile bağlanır.
+        $anaBayiParam = trim((string)($params['ana_bayiler'] ?? ''));
+        $bayiFiltre   = '';
+        $bayiKodlari  = [];
+        if ($anaBayiParam !== '') {
+            if ($anaBayiParam === '*') {
+                $bayiler = $db->fetchAll("SELECT DigiturkAnaBayiler_Ad AS ad, DigiturkAnaBayiler_BayiKodu AS kod FROM DigiturkAnaBayiler WHERE Durum = 1 AND ISNULL(DigiturkAnaBayiler_BayiKodu, '') <> ''");
+            } else {
+                $idler = array_values(array_filter(array_map('intval', explode(',', $anaBayiParam))));
+                $bayiler = $idler ? $db->fetchAll(
+                    "SELECT DigiturkAnaBayiler_Ad AS ad, DigiturkAnaBayiler_BayiKodu AS kod FROM DigiturkAnaBayiler
+                     WHERE DigiturkAnaBayiler_Id IN (" . implode(',', array_fill(0, count($idler), '?')) . ")
+                       AND ISNULL(DigiturkAnaBayiler_BayiKodu, '') <> ''", $idler) : [];
+            }
+            $bayiKodlari = array_column($bayiler, 'kod');
+            if (!$bayiKodlari) {
+                return ['durum' => 2, 'sonuc' => 'Seçilen ana bayilerin bayi kodu bulunamadı.', 'cikti' => ob_get_clean()];
+            }
+            $bayiFiltre = ' AND IrisRapor_TalebiGirenBayiKodu IN (' . implode(',', array_fill(0, count($bayiKodlari), '?')) . ')';
+            $bayiAdlari = implode(', ', array_column($bayiler, 'ad'));
+            echo "  Ana bayi filtresi: {$bayiAdlari}\n";
+        }
+        $prm = array_merge([$tarih, $bitis], $bayiKodlari);
+
+        // Gruplama (opsiyonel): boş/"birim" = alt bayi adı (varsayılan), "personel" = talebi giren personel (personel-raporu.php gibi)
+        $personelBazli = ($params['gruplama'] ?? '') === 'personel';
+        $grupIfade = $personelBazli
+            ? "ISNULL(NULLIF(IrisRapor_TalebiGirenPersonel, N''), N'-') + ISNULL(N' (' + NULLIF(IrisRapor_TalebiGirenPersonelAltbayi, N'') + N')', N'')"
+            : 'IrisRapor_TalebiGirenPersonelAltbayi';
+        if ($personelBazli) echo "  Gruplama: personel\n";
+
+        // Pivot sorgular (bayi-gunluk-rapor.php ile aynı; yalnız gruplama kolonu ve tarih/durum koşulu değişir)
+        $pivot = fn(string $kosul) => $db->fetchAll("
             SELECT
-                IrisRapor_TalebiGirenPersonelAltbayi AS bayi,
+                grup AS bayi,
                 ISNULL([ISP],  0) AS isp,
                 ISNULL([NEO],  0) AS neo,
                 ISNULL([UYDU], 0) AS uydu,
                 ISNULL([NEO],  0) + ISNULL([UYDU], 0) AS toplam
             FROM (
-                SELECT IrisRapor_TalebiGirenPersonelAltbayi, IrisRapor_MemoKayitTipi
+                SELECT {$grupIfade} AS grup, IrisRapor_MemoKayitTipi
                 FROM dbo.DigiturkIrisRapor
-                WHERE CAST(IrisRapor_TalepGirisTarihi AS DATE) BETWEEN ? AND ?
+                WHERE {$kosul}{$bayiFiltre}
             ) src
             PIVOT (COUNT(IrisRapor_MemoKayitTipi) FOR IrisRapor_MemoKayitTipi IN ([ISP], [NEO], [UYDU])) AS PV
-            ORDER BY toplam DESC
-        ", [$tarih, $bitis]);
+            ORDER BY toplam DESC, grup
+        ", $prm);
 
-        $kurulum = $db->fetchAll("
-            SELECT
-                IrisRapor_TalebiGirenPersonelAltbayi AS bayi,
-                ISNULL([ISP],  0) AS isp,
-                ISNULL([NEO],  0) AS neo,
-                ISNULL([UYDU], 0) AS uydu,
-                ISNULL([NEO],  0) + ISNULL([UYDU], 0) AS toplam
-            FROM (
-                SELECT IrisRapor_TalebiGirenPersonelAltbayi, IrisRapor_MemoKayitTipi
-                FROM dbo.DigiturkIrisRapor
-                WHERE CAST(IrisRapor_MemoKapanisTarihi AS DATE) BETWEEN ? AND ?
-                  AND IrisRapor_SatisDurumu = 'Tamamlandı'
-            ) src
-            PIVOT (COUNT(IrisRapor_MemoKayitTipi) FOR IrisRapor_MemoKayitTipi IN ([ISP], [NEO], [UYDU])) AS PV
-            ORDER BY toplam DESC
-        ", [$tarih, $bitis]);
+        $satis   = $pivot("CAST(IrisRapor_TalepGirisTarihi AS DATE) BETWEEN ? AND ?");
+        $kurulum = $pivot("CAST(IrisRapor_MemoKapanisTarihi AS DATE) BETWEEN ? AND ? AND IrisRapor_SatisDurumu = 'Tamamlandı'");
+        $onay    = $pivot("CAST(IrisRapor_TalepGirisTarihi AS DATE) BETWEEN ? AND ? AND IrisRapor_TeyitDurum = 'ONAYLANDI'");
 
-        $onay = $db->fetchAll("
-            SELECT
-                IrisRapor_TalebiGirenPersonelAltbayi AS bayi,
-                ISNULL([ISP],  0) AS isp,
-                ISNULL([NEO],  0) AS neo,
-                ISNULL([UYDU], 0) AS uydu,
-                ISNULL([NEO],  0) + ISNULL([UYDU], 0) AS toplam
-            FROM (
-                SELECT IrisRapor_TalebiGirenPersonelAltbayi, IrisRapor_MemoKayitTipi
-                FROM dbo.DigiturkIrisRapor
-                WHERE CAST(IrisRapor_TalepGirisTarihi AS DATE) BETWEEN ? AND ?
-                  AND IrisRapor_TeyitDurum = 'ONAYLANDI'
-            ) src
-            PIVOT (COUNT(IrisRapor_MemoKayitTipi) FOR IrisRapor_MemoKayitTipi IN ([ISP], [NEO], [UYDU])) AS PV
-            ORDER BY toplam DESC
-        ", [$tarih, $bitis]);
+        // VOIP gideri birim bazlı, ana bayiye bağlanamıyor → filtreli raporda gösterilmez
+        $voip = $bayiFiltre === '' ? voipGunlukUcret($db, $tarih, $bitis) : [];
 
-        $voip = voipGunlukUcret($db, $tarih, $bitis);
-
-        $sonKayit    = $db->fetchOne("SELECT MAX(GuncellemeTarihi) AS son_tarih FROM dbo.DigiturkIrisRapor WHERE CAST(IrisRapor_TalepGirisTarihi AS DATE) BETWEEN ? AND ?", [$tarih, $bitis]);
+        $sonKayit    = $db->fetchOne("SELECT MAX(GuncellemeTarihi) AS son_tarih FROM dbo.DigiturkIrisRapor WHERE CAST(IrisRapor_TalepGirisTarihi AS DATE) BETWEEN ? AND ?{$bayiFiltre}", $prm);
         $raporTarihi = $sonKayit['son_tarih'] ? date('d.m.Y H:i', strtotime($sonKayit['son_tarih'])) : null;
 
         // Görsel üret
         echo "  Görsel oluşturuluyor...\n";
-        $png = bayiRaporGorselCiz($satis, $kurulum, $onay, $voip, $tarih, $raporTarihi, $aralik ? $tarihDisplay : null);
+        $png = bayiRaporGorselCiz($satis, $kurulum, $onay, $voip, $tarih, $raporTarihi, $aralik ? $tarihDisplay : null,
+                                  $personelBazli ? 'PERSONEL (ALT BAYİ)' : 'BAYİ İSMİ');
         echo "  Görsel boyutu: " . strlen($png) . " bayt\n";
 
         $caption  = ($aralik ? '📊 Bayi Dönem Raporu — ' : '📊 Bayi Günlük Rapor — ') . $tarihDisplay;
+        if ($bayiFiltre !== '') $caption .= "\n🏢 {$bayiAdlari}";
         if ($raporTarihi) $caption .= "\n🕐 Son güncelleme: {$raporTarihi}";
 
         $basarili = $hatali = 0;

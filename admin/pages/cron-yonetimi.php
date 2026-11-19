@@ -683,6 +683,9 @@ function renderGorevler(data) {
             const editBtn    = canEdit
                 ? `<button class="btn btn-xs btn-warning me-1" onclick="zamanlamaAc(${g.CronGorevler_Id}, ${z.CronZamanlamalar_Id})" title="Düzenle"><i class="bi bi-pencil"></i></button>`
                 : '';
+            const klonBtn    = canAdd
+                ? `<button class="btn btn-xs btn-info me-1" onclick="zamanlamaAc(${g.CronGorevler_Id}, ${z.CronZamanlamalar_Id}, true)" title="Klonla"><i class="bi bi-copy"></i></button>`
+                : '';
             const silBtn     = canDel
                 ? `<button class="btn btn-xs btn-danger" onclick="zamanlamaSil(${z.CronZamanlamalar_Id}, '${esc(z.CronZamanlamalar_Ad)}')" title="Sil"><i class="bi bi-trash"></i></button>`
                 : '';
@@ -696,7 +699,7 @@ function renderGorevler(data) {
                 <td class="small">${esc(z.Baslangic || '—')}${bitisStr}</td>
                 <td class="small">${esc(z.SonCalisma || '—')}</td>
                 <td>${z.SonCalisma ? durumBadge : '<span class="text-muted">—</span>'}${z.SonSure != null ? `<br><small class="text-muted">${z.SonSure}s</small>` : ''}</td>
-                <td>${aktifBtn}${tetikleBtn}${editBtn}${silBtn}</td>
+                <td class="text-nowrap">${aktifBtn}${tetikleBtn}${editBtn}${klonBtn}${silBtn}</td>
             </tr>`;
         }).join('');
 
@@ -729,7 +732,7 @@ function renderGorevler(data) {
             </div>
             <div class="card-body p-0">
                 <table class="table table-bordered table-sm mb-0 z-table">
-                    <thead class="table-light"><tr><th>Zamanlayıcı Adı</th><th>Cron İfadesi</th><th>Başlangıç / Bitiş</th><th>Son Çalışma</th><th>Durum</th><th style="width:120px">İşlem</th></tr></thead>
+                    <thead class="table-light"><tr><th>Zamanlayıcı Adı</th><th>Cron İfadesi</th><th>Başlangıç / Bitiş</th><th>Son Çalışma</th><th>Durum</th><th style="width:150px">İşlem</th></tr></thead>
                     <tbody>${zSatirlar}</tbody>
                 </table>
             </div>
@@ -755,12 +758,13 @@ function calismaDurumBadge(d) {
 }
 
 // ─── Zamanlayıcı Modal ────────────────────────────────────────────────────────
-function zamanlamaAc(gorevId, zamanlamaId) {
+// klon=true: kaynak zamanlayıcının ayarlarıyla dolu, kimliksiz (yeni kayıt) form açar
+function zamanlamaAc(gorevId, zamanlamaId, klon = false) {
     const g = gorevler.find(x => x.CronGorevler_Id == gorevId);
     if (!g) return;
 
     document.getElementById('z_gorev_id').value = gorevId;
-    document.getElementById('z_id').value        = zamanlamaId || '';
+    document.getElementById('z_id').value        = (zamanlamaId && !klon) ? zamanlamaId : '';
     document.getElementById('z_sablon').value    = '';
 
     const params = JSON.parse(g.CronGorevler_Parametreler || '[]');
@@ -768,10 +772,10 @@ function zamanlamaAc(gorevId, zamanlamaId) {
     document.getElementById('z_params_container').style.display = hasPar ? '' : 'none';
 
     if (zamanlamaId) {
-        document.getElementById('zamanlamaBaslik').textContent = 'Zamanlayıcı Düzenle';
+        document.getElementById('zamanlamaBaslik').textContent = klon ? 'Zamanlayıcı Klonla' : 'Zamanlayıcı Düzenle';
         const z = (g.Zamanlamalar || []).find(x => x.CronZamanlamalar_Id == zamanlamaId);
         if (!z) return;
-        document.getElementById('z_ad').value      = z.CronZamanlamalar_Ad;
+        document.getElementById('z_ad').value      = klon ? z.CronZamanlamalar_Ad + ' (Kopya)' : z.CronZamanlamalar_Ad;
         document.getElementById('z_cron').value    = z.CronZamanlamalar_CronIfadesi;
         document.getElementById('z_sablon').value  = z.CronZamanlamalar_CronIfadesi;
         document.getElementById('z_baslangic').value = (z.Baslangic || '').replace(' ', 'T');
@@ -812,7 +816,7 @@ function renderZamanlamaParams(schema, values) {
                 <label class="form-label mb-1">${esc(p.etiket)} ${p.zorunlu ? '<span class="text-danger">*</span>' : ''}</label>
                 <select class="form-select form-select-sm" id="zp_${p.ad}" multiple></select>
             </div>`);
-            cokluSecimKur('#zp_' + p.ad, '#zamanlamaModal', val, p.tip);
+            cokluSecimKur('#zp_' + p.ad, '#zamanlamaModal', val, p.tip, p.bilgi);
         } else if (SECIMLI_TIPLER.includes(p.tip)) {
             const opts = secimOptions(p.tip, val, p);
             $alan.append(`
@@ -891,7 +895,8 @@ function paramDeger(selId) {
 }
 
 // Çoklu seçimli tipler (COKLU_KAYNAK) — kayıtlı kodlar hemen seçili gösterilir, liste gelince adlarıyla doldurulur
-function cokluSecimKur(selId, modalId, kayitli, tip) {
+// bilgi: şemadaki parametreye özel açıklama (verilmezse tipin varsayılan metni)
+function cokluSecimKur(selId, modalId, kayitli, tip, bilgi) {
     const kaynak = COKLU_KAYNAK[tip];
     const secili = String(kayitli || '').split(',').map(s => s.trim()).filter(Boolean);
     const $sel   = $(selId);
@@ -911,7 +916,7 @@ function cokluSecimKur(selId, modalId, kayitli, tip) {
             <button type="button" class="btn btn-link btn-sm p-0 me-3"><i class="bi bi-check2-all"></i> Listedekilerin tümünü seç</button>
             <button type="button" class="btn btn-link btn-sm p-0 text-danger"><i class="bi bi-x-lg"></i> Temizle</button>
         </div>
-        <div class="form-text">${esc(kaynak.bilgi)}</div>`);
+        <div class="form-text">${esc(bilgi || kaynak.bilgi)}</div>`);
     $btn.find('button').eq(0).on('click', () => $sel.val([TUM_BAYILER]).trigger('change'));
     $btn.find('button').eq(1).on('click', () => $sel.val($sel.find('option').map((i, o) => o.value).get().filter(x => x !== TUM_BAYILER)).trigger('change'));
     $btn.find('button').eq(2).on('click', () => $sel.val(null).trigger('change'));
@@ -1054,7 +1059,7 @@ function renderTetikleParams(params, values) {
                 <label class="form-label">${esc(p.etiket)} ${p.zorunlu ? '<span class="text-danger">*</span>' : ''}</label>
                 <select class="form-select" id="tp_${p.ad}" multiple></select>
             </div>`);
-            cokluSecimKur('#tp_' + p.ad, '#tetikleModal', saved, p.tip);
+            cokluSecimKur('#tp_' + p.ad, '#tetikleModal', saved, p.tip, p.bilgi);
             return;
         }
         if (SECIMLI_TIPLER.includes(p.tip)) {
