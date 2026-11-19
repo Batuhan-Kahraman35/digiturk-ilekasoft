@@ -1,7 +1,7 @@
 <?php
 /**
  * Admin Panel - Müşteri Arama (Toplu Sorgu)
- * DigiturkIrisRapor üzerinde IrisRapor_DtMusteriNo veya IrisRapor_MemoId ile toplu arama.
+ * DigiturkIrisRapor üzerinde IrisRapor_DtMusteriNo, IrisRapor_MemoId veya IrisRapor_Telefon ile toplu arama.
  */
 
 require_once __DIR__ . '/../auth.php';
@@ -44,15 +44,92 @@ $izinliBirimler = $gk['izinliBirimler'];
 // En fazla toplu sorgulanabilecek numara sayısı (MSSQL parametre limiti güvenli sınırı)
 const MUSTERI_ARAMA_MAX = 1000;
 
+// Arama alanı → DigiturkIrisRapor kolonu (whitelist)
+const MUSTERI_ARAMA_ALANLAR = [
+    'musteri' => 'IrisRapor_DtMusteriNo',
+    'memo'    => 'IrisRapor_MemoId',
+    'telefon' => 'IrisRapor_Telefon',
+];
+
+// Sonuç kolonları (tablo + excel + SELECT ortak): kolon => başlık
+const MUSTERI_ARAMA_KOLONLAR = [
+    'IrisRapor_MemoId'                     => 'Memo ID',
+    'IrisRapor_DtMusteriNo'                => 'Müşteri No',
+    'IrisRapor_UyeAd'                      => 'Ad',
+    'IrisRapor_UyeSoyad'                   => 'Soyad',
+    'IrisRapor_Telefon'                    => 'Telefon',
+    'IrisRapor_Telefonlar'                 => 'Telefonlar',
+    'IrisRapor_Il'                         => 'İl',
+    'IrisRapor_Ilce'                       => 'İlçe',
+    'IrisRapor_Adres'                      => 'Adres',
+    'IrisRapor_TalepId'                    => 'Talep ID',
+    'IrisRapor_TalepTuru'                  => 'Talep Türü',
+    'IrisRapor_TalepKaynak'                => 'Talep Kaynağı',
+    'IrisRapor_MemoKayitTipi'              => 'Kayıt Tipi',
+    'IrisRapor_MemoIdTip'                  => 'Memo ID Tipi',
+    'IrisRapor_MemoKodu'                   => 'Memo Kodu',
+    'IrisRapor_TalepGirisTarihi'           => 'Talep Giriş',
+    'IrisRapor_MemoKapanisTarihi'          => 'Memo Kapanış',
+    'IrisRapor_RandevuTarihi'              => 'Randevu Tarihi',
+    'IrisRapor_TalebiGirenBayiKodu'        => 'Talebi Giren Bayi Kodu',
+    'IrisRapor_TalebiGirenBayiAdi'         => 'Talebi Giren Bayi',
+    'IrisRapor_TalebiGirenPersonel'        => 'Personel',
+    'IrisRapor_TalebiGirenPersonelNo'      => 'Personel No',
+    'IrisRapor_TalebiGirenPersonelKodu'    => 'Personel Kodu',
+    'IrisRapor_TalebiGirenPersonelAltbayi' => 'Alt Bayi',
+    'Birim'                                => 'Birim',
+    'IrisRapor_MemoYonlenenBayiKodu'       => 'Yönlenen Bayi Kodu',
+    'IrisRapor_MemoYonlenenBayiAdi'        => 'Yönlenen Bayi',
+    'IrisRapor_MemoYonlenenBayiYoneticisi' => 'Yönlenen Bayi Yöneticisi',
+    'IrisRapor_MemoYonlenenBayiBolge'      => 'Yönlenen Bayi Bölge',
+    'IrisRapor_MemoYonlenenBayiTeknikYntc' => 'Yönlenen Bayi Teknik Yön.',
+    'IrisRapor_SatisDurumu'                => 'Satış Durumu',
+    'IrisRapor_BasvuruSurecDurumu'         => 'Başvuru Süreç',
+    'IrisRapor_TeyitDurum'                 => 'Teyit',
+    'IrisRapor_TeyitAramaDurum'            => 'Teyit Arama',
+    'IrisRapor_GuncelOutletDurum'          => 'Güncel Outlet Durum',
+    'IrisRapor_MemoSonDurum'               => 'Memo Son Durum',
+    'IrisRapor_MemoSonCevap'               => 'Memo Son Cevap',
+    'IrisRapor_MemoSonAciklama'            => 'Memo Açıklama',
+    'IrisRapor_TalepTakipNotu'             => 'Talep Takip Notu',
+    'IrisRapor_UyduBasvuruPotansiyelNo'    => 'Uydu Potansiyel No',
+    'IrisRapor_UyduBasvuruUyeNo'           => 'Uydu Üye No',
+    'IrisRapor_AktiveEdilenUyeNo'          => 'Aktive Üye No',
+    'IrisRapor_AktiveEdilenOutletNo'       => 'Aktive Outlet No',
+    'IrisRapor_AktiveEdilenSozlesmeNo'     => 'Aktive Sözleşme No',
+    'IrisRapor_AktiveEdilenSozlesmeKmp'    => 'Aktive Sözleşme Kampanya',
+    'IrisRapor_AktiveEdilenSozlesmeDurum'  => 'Aktive Sözleşme Durum',
+    'IrisRapor_Paket'                      => 'Paket',
+    'IrisRapor_Kampanya'                   => 'Kampanya',
+    'IrisRapor_DetayTarihi'                => 'Detay Tarihi',
+];
+
+// Tarih kolonları (yyyy-mm-dd hh:mi:ss formatında döner)
+const MUSTERI_ARAMA_TARIH_KOLONLAR = [
+    'IrisRapor_TalepGirisTarihi', 'IrisRapor_MemoKapanisTarihi', 'IrisRapor_RandevuTarihi', 'IrisRapor_DetayTarihi',
+];
+
+// Tabloda kısaltılarak gösterilen uzun metin kolonları (Excel'de tam)
+const MUSTERI_ARAMA_UZUN_KOLONLAR = [
+    'IrisRapor_Adres', 'IrisRapor_MemoSonCevap', 'IrisRapor_MemoSonAciklama', 'IrisRapor_TalepTakipNotu',
+    'IrisRapor_Paket', 'IrisRapor_Kampanya',
+];
+
+function musteriAramaAlan(?string $alan): string {
+    return isset(MUSTERI_ARAMA_ALANLAR[$alan]) ? $alan : 'musteri';
+}
+
 /**
  * Textarea içeriğinden tekil, sayısal numara listesi üretir.
  * Satır sonu, virgül, noktalı virgül, boşluk ve tab ayırıcı kabul eder.
+ * Telefon aramasında 0 / 90 / +90 öneki atılır, son 10 hane (5xxxxxxxxx) kullanılır.
  */
-function musteriAramaNumaralariAyristir(string $ham): array {
+function musteriAramaNumaralariAyristir(string $ham, string $alan = 'musteri'): array {
     $parcalar = preg_split('/[\s,;]+/', $ham, -1, PREG_SPLIT_NO_EMPTY);
     $temiz = [];
     foreach ($parcalar as $p) {
         $p = preg_replace('/\D/', '', $p); // yalnız rakam
+        if ($alan === 'telefon' && strlen($p) > 10) $p = substr($p, -10);
         if ($p !== '') $temiz[$p] = $p;    // anahtar ile tekilleştir
     }
     return array_values($temiz);
@@ -63,8 +140,18 @@ function musteriAramaNumaralariAyristir(string $ham): array {
 function musteriAramaSorgula($db, string $alan, array $numaralar, bool $birimKisitli = false, array $izinliBirimler = []): array {
     if (empty($numaralar)) return [];
 
-    $kolon  = $alan === 'memo' ? 'IrisRapor_MemoId' : 'IrisRapor_DtMusteriNo';
+    $kolon  = MUSTERI_ARAMA_ALANLAR[$alan];
     $ph     = implode(',', array_fill(0, count($numaralar), '?'));
+
+    // SELECT listesi kolon tanımından üretilir
+    $secim = [];
+    foreach (array_keys(MUSTERI_ARAMA_KOLONLAR) as $k) {
+        if ($k === 'Birim') { $secim[] = 'bm.birim AS Birim'; continue; }
+        $secim[] = in_array($k, MUSTERI_ARAMA_TARIH_KOLONLAR, true)
+            ? "CONVERT(VARCHAR(19), ir.{$k}, 120) AS {$k}"
+            : "ir.{$k}";
+    }
+    $secimSql = implode(",\n            ", $secim);
     $params = $numaralar;
 
     // Birim görünürlük kısıtı: kaydın alt bayisi izinli birimlerden birine yetkili mi?
@@ -88,24 +175,7 @@ function musteriAramaSorgula($db, string $alan, array $numaralar, bool $birimKis
 
     return $db->fetchAll("
         SELECT
-            ir.IrisRapor_MemoId,
-            ir.IrisRapor_DtMusteriNo,
-            ir.IrisRapor_TalepTuru,
-            ir.IrisRapor_MemoKayitTipi,
-            ir.IrisRapor_MemoKodu,
-            CONVERT(VARCHAR(19), ir.IrisRapor_TalepGirisTarihi, 120)  AS TalepGirisTarihi,
-            CONVERT(VARCHAR(19), ir.IrisRapor_MemoKapanisTarihi, 120) AS MemoKapanisTarihi,
-            ir.IrisRapor_TalebiGirenBayiAdi,
-            ir.IrisRapor_TalebiGirenPersonel,
-            ir.IrisRapor_TalebiGirenPersonelAltbayi,
-            bm.birim AS Birim,
-            ir.IrisRapor_SatisDurumu,
-            ir.IrisRapor_BasvuruSurecDurumu,
-            ir.IrisRapor_TeyitDurum,
-            ir.IrisRapor_MemoSonDurum,
-            ir.IrisRapor_MemoSonAciklama,
-            ir.IrisRapor_Paket,
-            ir.IrisRapor_Kampanya
+            {$secimSql}
         FROM DigiturkIrisRapor ir
         OUTER APPLY (
             SELECT TOP 1 kb.KullaniciBirim_Adi AS birim
@@ -125,8 +195,8 @@ function musteriAramaSorgula($db, string $alan, array $numaralar, bool $birimKis
 
 // Excel indir (JSON header'dan önce yakalanır)
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'excel_indir') {
-    $alan      = ($_POST['alan'] ?? 'musteri') === 'memo' ? 'memo' : 'musteri';
-    $numaralar = musteriAramaNumaralariAyristir($_POST['numaralar'] ?? '');
+    $alan      = musteriAramaAlan($_POST['alan'] ?? null);
+    $numaralar = musteriAramaNumaralariAyristir($_POST['numaralar'] ?? '', $alan);
     if (count($numaralar) > MUSTERI_ARAMA_MAX) $numaralar = array_slice($numaralar, 0, MUSTERI_ARAMA_MAX);
     $list = musteriAramaSorgula($db, $alan, $numaralar, $birimKisitli, $izinliBirimler);
 
@@ -145,19 +215,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'excel
     echo '</x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook></xml></head><body>';
     echo '<table border="1">';
     echo '<thead><tr style="background-color:#0d6efd;color:#fff;font-weight:bold;">';
-    echo '<th>Memo ID</th><th>Müşteri No</th><th>Talep Türü</th><th>Kayıt Tipi</th><th>Memo Kodu</th>';
-    echo '<th>Talep Giriş</th><th>Memo Kapanış</th><th>Talebi Giren Bayi</th><th>Personel</th><th>Alt Bayi</th><th>Birim</th>';
-    echo '<th>Satış Durumu</th><th>Başvuru Süreç</th><th>Teyit</th><th>Memo Son Durum</th><th>Memo Açıklama</th>';
-    echo '<th>Paket</th><th>Kampanya</th>';
+    foreach (MUSTERI_ARAMA_KOLONLAR as $baslik) echo '<th>' . htmlspecialchars($baslik) . '</th>';
     echo '</tr></thead><tbody>';
     foreach ($list as $r) {
         echo '<tr>';
-        foreach ([
-            'IrisRapor_MemoId','IrisRapor_DtMusteriNo','IrisRapor_TalepTuru','IrisRapor_MemoKayitTipi','IrisRapor_MemoKodu',
-            'TalepGirisTarihi','MemoKapanisTarihi','IrisRapor_TalebiGirenBayiAdi','IrisRapor_TalebiGirenPersonel','IrisRapor_TalebiGirenPersonelAltbayi','Birim',
-            'IrisRapor_SatisDurumu','IrisRapor_BasvuruSurecDurumu','IrisRapor_TeyitDurum','IrisRapor_MemoSonDurum','IrisRapor_MemoSonAciklama',
-            'IrisRapor_Paket','IrisRapor_Kampanya',
-        ] as $k) {
+        foreach (array_keys(MUSTERI_ARAMA_KOLONLAR) as $k) {
             echo '<td style="mso-number-format:\'\@\'">' . htmlspecialchars((string)($r[$k] ?? '')) . '</td>';
         }
         echo '</tr>';
@@ -175,8 +237,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         switch ($action) {
 
             case 'ara':
-                $alan      = ($_POST['alan'] ?? 'musteri') === 'memo' ? 'memo' : 'musteri';
-                $numaralar = musteriAramaNumaralariAyristir($_POST['numaralar'] ?? '');
+                $alan      = musteriAramaAlan($_POST['alan'] ?? null);
+                $numaralar = musteriAramaNumaralariAyristir($_POST['numaralar'] ?? '', $alan);
 
                 if (empty($numaralar)) {
                     echo json_encode(['success' => false, 'message' => 'Lütfen en az bir numara girin.']);
@@ -190,7 +252,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
 
                 $list  = musteriAramaSorgula($db, $alan, $numaralar, $birimKisitli, $izinliBirimler);
-                $kolon = $alan === 'memo' ? 'IrisRapor_MemoId' : 'IrisRapor_DtMusteriNo';
+                $kolon = MUSTERI_ARAMA_ALANLAR[$alan];
 
                 // Bulunan tekil numaralar → bulunamayanları çıkar
                 $bulunanSet = [];
@@ -332,6 +394,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                         <label class="btn btn-outline-primary" for="alan_musteri"><i class="bi bi-person-vcard"></i> Müşteri No</label>
                                         <input type="radio" class="btn-check" name="alan" id="alan_memo" value="memo">
                                         <label class="btn btn-outline-primary" for="alan_memo"><i class="bi bi-hash"></i> Memo ID</label>
+                                        <input type="radio" class="btn-check" name="alan" id="alan_telefon" value="telefon">
+                                        <label class="btn btn-outline-primary" for="alan_telefon"><i class="bi bi-telephone"></i> Telefon</label>
                                     </div>
                                     <small class="text-muted d-block mt-2">
                                         Her satıra bir numara girin (virgül/boşlukla da ayırabilirsiniz).
@@ -371,19 +435,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             <table id="kayitTable" class="table table-bordered table-striped table-hover" style="width:100%">
                                 <thead>
                                     <tr>
-                                        <th>Memo ID</th>
-                                        <th>Müşteri No</th>
-                                        <th>Talep Türü</th>
-                                        <th>Kayıt Tipi</th>
-                                        <th>Talep Giriş</th>
-                                        <th>Alt Bayi</th>
-                                        <th>Birim</th>
-                                        <th>Satış Durumu</th>
-                                        <th>Başvuru Süreç</th>
-                                        <th>Teyit</th>
-                                        <th>Memo Son Durum</th>
-                                        <th>Paket</th>
-                                        <th>Kampanya</th>
+                                        <?php foreach (MUSTERI_ARAMA_KOLONLAR as $baslik): ?>
+                                        <th><?= htmlspecialchars($baslik) ?></th>
+                                        <?php endforeach; ?>
                                     </tr>
                                 </thead>
                                 <tbody></tbody>
@@ -411,6 +465,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 <script>
     let dataTable, sonAramaVar = false;
+    const KOLONLAR      = <?= json_encode(array_keys(MUSTERI_ARAMA_KOLONLAR)) ?>;
+    const UZUN_KOLONLAR = <?= json_encode(MUSTERI_ARAMA_UZUN_KOLONLAR) ?>;
+    const ALAN_ETIKET   = { musteri: 'Müşteri Numaraları', memo: 'Memo ID Numaraları', telefon: 'Telefon Numaraları' };
 
     function numaralariSay() {
         const parcalar = ($('#numaralar').val() || '').split(/[\s,;]+/).filter(x => x.replace(/\D/g, '') !== '');
@@ -431,8 +488,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         // Radyo değişince label güncelle
         $('input[name="alan"]').on('change', function () {
-            const memo = $('#alan_memo').is(':checked');
-            $('#numaraLabel').text(memo ? 'Memo ID Numaraları' : 'Müşteri Numaraları');
+            $('#numaraLabel').text(ALAN_ETIKET[$('input[name="alan"]:checked').val()] || ALAN_ETIKET.musteri);
         });
 
         $('#aramaForm').on('submit', function (e) {
@@ -506,21 +562,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     function renderTable(rows) {
         dataTable.clear();
         rows.forEach(row => {
-            dataTable.row.add([
-                escapeHtml(row.IrisRapor_MemoId || '-'),
-                escapeHtml(row.IrisRapor_DtMusteriNo || '-'),
-                escapeHtml(row.IrisRapor_TalepTuru || '-'),
-                escapeHtml(row.IrisRapor_MemoKayitTipi || '-'),
-                escapeHtml(row.TalepGirisTarihi || '-'),
-                escapeHtml(row.IrisRapor_TalebiGirenPersonelAltbayi || '-'),
-                escapeHtml(row.Birim || '-'),
-                escapeHtml(row.IrisRapor_SatisDurumu || '-'),
-                escapeHtml(row.IrisRapor_BasvuruSurecDurumu || '-'),
-                escapeHtml(row.IrisRapor_TeyitDurum || '-'),
-                escapeHtml(row.IrisRapor_MemoSonDurum || '-'),
-                escapeHtml(row.IrisRapor_Paket || '-'),
-                escapeHtml(row.IrisRapor_Kampanya || '-')
-            ]);
+            dataTable.row.add(KOLONLAR.map(k => {
+                const v = row[k];
+                if (v === null || v === undefined || v === '') return '-';
+                const s = String(v);
+                if (UZUN_KOLONLAR.includes(k) && s.length > 60) {
+                    return '<span title="' + escapeHtml(s) + '">' + escapeHtml(s.substring(0, 60)) + '…</span>';
+                }
+                return escapeHtml(s);
+            }));
         });
         dataTable.draw();
     }
