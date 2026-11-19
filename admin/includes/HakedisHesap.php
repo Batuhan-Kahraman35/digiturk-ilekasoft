@@ -20,6 +20,36 @@ if (!function_exists('hakedisDonemTarihleri')) {
     }
 }
 
+if (!function_exists('hakedisAltBayiApply')) {
+    /**
+     * IrisRapor satırını (r) alt bayiye bağlayan OUTER APPLY (alias: ab → altbayiId, altbayiAd, anaBayiAd).
+     *
+     * - Rapor alt bayi adını taşıyorsa ad ile eşleşir. Aynı adlı birden çok alt bayi varsa
+     *   (ör. "AYER DİGİTAL" hem ORNEK hem ORNEK BAYI altında) talebi giren bayi KODU,
+     *   sonra adı ile örtüşen ana bayinin alt bayisi seçilir.
+     * - Alt bayi adı boşsa (satışı ana bayinin kendi personeli girmiş, ör. İZMİR BATI/DOĞU)
+     *   talebi giren bayi koduna sahip ana bayinin alt bayisine bağlanır.
+     */
+    function hakedisAltBayiApply(): string {
+        return "OUTER APPLY (
+                    SELECT TOP 1 a.DigiturkAltBayiler_Id  AS altbayiId,
+                                 a.DigiturkAltBayiler_Ad  AS altbayiAd,
+                                 an.DigiturkAnaBayiler_Ad AS anaBayiAd
+                    FROM DigiturkAltBayiler a
+                    LEFT JOIN DigiturkAnaBayiler an ON an.DigiturkAnaBayiler_Id = a.DigiturkAltBayiler_AnaBayiId
+                    WHERE a.Durum = 1
+                      AND (a.DigiturkAltBayiler_Ad = r.IrisRapor_TalebiGirenPersonelAltbayi
+                           OR (r.IrisRapor_TalebiGirenPersonelAltbayi IS NULL
+                               AND an.DigiturkAnaBayiler_BayiKodu = r.IrisRapor_TalebiGirenBayiKodu))
+                    ORDER BY CASE WHEN an.DigiturkAnaBayiler_BayiKodu = r.IrisRapor_TalebiGirenBayiKodu THEN 0
+                                  WHEN an.DigiturkAnaBayiler_Ad       = r.IrisRapor_TalebiGirenBayiAdi  THEN 1
+                                  ELSE 2 END,
+                             CASE WHEN a.DigiturkAltBayiler_Ad = an.DigiturkAnaBayiler_Ad THEN 0 ELSE 1 END,
+                             a.DigiturkAltBayiler_Id DESC
+                ) ab";
+    }
+}
+
 /**
  * Alt bayi × kampanya hakediş hesabı.
  *
@@ -50,32 +80,8 @@ function hakedisHesapla(array $in, $db, bool $birimKisitli, array $izinliBirimId
     }
 
     // ── Ortak filtreler (aya bağlı değil, bir kez hesaplanır) ──
-    // IrisRapor bayiyi yalnız ADIYLA taşır. Aynı ada sahip birden fazla alt bayi varsa
-    // (ör. "AYER DİGİTAL" hem ORNEK hem ORNEK BAYI altında) ad tek başına yetmez;
-    // bu durumda ana bayi adı (IrisRapor_TalebiGirenBayiAdi) da eşleşme şartı olur.
-    // Adı tekil olan bayilerde ek şart uygulanmaz — mevcut davranış korunur.
-    $bayiFilter = '';
-    $bayiAd     = null;
-    $bayiAnaAd  = null;
-    if ($altbayiId) {
-        $ab = $db->fetchOne("
-            SELECT a.DigiturkAltBayiler_Ad AS ad,
-                   an.DigiturkAnaBayiler_Ad AS anaAd,
-                   (SELECT COUNT(*) FROM dbo.DigiturkAltBayiler x
-                     WHERE x.DigiturkAltBayiler_Ad = a.DigiturkAltBayiler_Ad AND x.Durum = 1) AS adAdedi
-            FROM dbo.DigiturkAltBayiler a
-            LEFT JOIN dbo.DigiturkAnaBayiler an ON an.DigiturkAnaBayiler_Id = a.DigiturkAltBayiler_AnaBayiId
-            WHERE a.DigiturkAltBayiler_Id = ?
-        ", [$altbayiId]);
-        if ($ab) {
-            $bayiFilter = " AND r.IrisRapor_TalebiGirenPersonelAltbayi = ?";
-            $bayiAd     = $ab['ad'];
-            if ((int)$ab['adAdedi'] > 1 && !empty($ab['anaAd'])) {
-                $bayiFilter .= " AND r.IrisRapor_TalebiGirenBayiAdi = ?";
-                $bayiAnaAd   = $ab['anaAd'];
-            }
-        }
-    }
+    // Alt bayi filtresi, satırın çözülen alt bayi ID'si üzerinden (hakedisAltBayiApply)
+    $bayiFilter = $altbayiId ? " AND ab.altbayiId = ?" : '';
 
     // Birim filtresi + görünürlük kısıtı → efektif birim adları (ka.Birim IN ...)
     $birimFilter = '';
@@ -142,10 +148,9 @@ function hakedisHesapla(array $in, $db, bool $birimKisitli, array $izinliBirimId
             [$bas, $bit] = hakedisDonemTarihleri($yil, $ay); $donemKaynak = 'formul';
         }
 
-        // Parametre sırası: bas, bit, [bayi], [anaBayi], [outlet], [satis], [birimAdlari...]
+        // Parametre sırası: bas, bit, [altbayiId], [outlet], [satis], [birimAdlari...]
         $qp = [$bas, $bit];
-        if ($bayiAd    !== null) $qp[] = $bayiAd;
-        if ($bayiAnaAd !== null) $qp[] = $bayiAnaAd;
+        if ($altbayiId) $qp[] = $altbayiId;
         $durumFilter = '';
         if ($outlet !== '') { $durumFilter .= " AND r.IrisRapor_GuncelOutletDurum = ?"; $qp[] = $outlet; }
         if ($satis  !== '') { $durumFilter .= " AND r.IrisRapor_SatisDurumu = ?";       $qp[] = $satis; }
@@ -155,7 +160,7 @@ function hakedisHesapla(array $in, $db, bool $birimKisitli, array $izinliBirimId
         $sql = "
             ;WITH uygun AS (
                 SELECT
-                    r.IrisRapor_TalebiGirenPersonelAltbayi AS Altbayi,
+                    ISNULL(r.IrisRapor_TalebiGirenPersonelAltbayi, ab.altbayiAd) AS Altbayi,
                     ab.anaBayiAd                            AS AnaBayi,
                     ISNULL(bm.birim, N'(Birim Yok)')       AS Birim,
                     bm.birimId                              AS BirimId,
@@ -169,20 +174,10 @@ function hakedisHesapla(array $in, $db, bool $birimKisitli, array $izinliBirimId
                     CASE WHEN sg.grupId IS NOT NULL
                          THEN 'G' + CAST(sg.grupId AS VARCHAR(20))
                          ELSE 'B' + CAST(ISNULL(ab.altbayiId, 0) AS VARCHAR(20))
-                              + N'|' + ISNULL(r.IrisRapor_TalebiGirenPersonelAltbayi, N'')
+                              + N'|' + ISNULL(ISNULL(r.IrisRapor_TalebiGirenPersonelAltbayi, ab.altbayiAd), N'')
                     END                                     AS GrupKey
                 FROM dbo.DigiturkIrisRapor r
-                OUTER APPLY (
-                    -- Aynı ada sahip birden fazla alt bayi olabilir; rapordaki ana bayi adıyla
-                    -- örtüşen kayıt önceliklidir, örtüşen yoksa eski davranış (en büyük Id) sürer.
-                    SELECT TOP 1 a.DigiturkAltBayiler_Id AS altbayiId,
-                                 an.DigiturkAnaBayiler_Ad AS anaBayiAd
-                    FROM DigiturkAltBayiler a
-                    LEFT JOIN DigiturkAnaBayiler an ON an.DigiturkAnaBayiler_Id = a.DigiturkAltBayiler_AnaBayiId
-                    WHERE a.DigiturkAltBayiler_Ad = r.IrisRapor_TalebiGirenPersonelAltbayi AND a.Durum = 1
-                    ORDER BY CASE WHEN an.DigiturkAnaBayiler_Ad = r.IrisRapor_TalebiGirenBayiAdi THEN 0 ELSE 1 END,
-                             a.DigiturkAltBayiler_Id DESC
-                ) ab
+                " . hakedisAltBayiApply() . "
                 OUTER APPLY (
                     -- Birim, yukarıda çözülen alt bayi ID'sinden gider (isim eşleşmesi değil)
                     SELECT TOP 1 kb.KullaniciBirim_Adi AS birim, kb.KullaniciBirim_id AS birimId
@@ -446,29 +441,8 @@ function hakedisIrisKayitlari(array $in, $db, bool $birimKisitli, array $izinliB
         return ['success' => false, 'message' => 'Yıl ve en az bir ay seçilmelidir'];
     }
 
-    // ── Alt bayi filtresi (ad + gerekiyorsa ana bayi adı) ──
-    $bayiFilter = '';
-    $bayiAd     = null;
-    $bayiAnaAd  = null;
-    if ($altbayiId) {
-        $ab = $db->fetchOne("
-            SELECT a.DigiturkAltBayiler_Ad AS ad,
-                   an.DigiturkAnaBayiler_Ad AS anaAd,
-                   (SELECT COUNT(*) FROM dbo.DigiturkAltBayiler x
-                     WHERE x.DigiturkAltBayiler_Ad = a.DigiturkAltBayiler_Ad AND x.Durum = 1) AS adAdedi
-            FROM dbo.DigiturkAltBayiler a
-            LEFT JOIN dbo.DigiturkAnaBayiler an ON an.DigiturkAnaBayiler_Id = a.DigiturkAltBayiler_AnaBayiId
-            WHERE a.DigiturkAltBayiler_Id = ?
-        ", [$altbayiId]);
-        if ($ab) {
-            $bayiFilter = " AND r.IrisRapor_TalebiGirenPersonelAltbayi = ?";
-            $bayiAd     = $ab['ad'];
-            if ((int)$ab['adAdedi'] > 1 && !empty($ab['anaAd'])) {
-                $bayiFilter .= " AND r.IrisRapor_TalebiGirenBayiAdi = ?";
-                $bayiAnaAd   = $ab['anaAd'];
-            }
-        }
-    }
+    // ── Alt bayi filtresi: çözülen alt bayi ID'si (hakedisHesapla ile aynı) ──
+    $bayiFilter = $altbayiId ? " AND ab.altbayiId = ?" : '';
 
     // ── Birim filtresi + görünürlük kısıtı → efektif birim adları ──
     $birimAdlari  = [];
@@ -531,8 +505,7 @@ function hakedisIrisKayitlari(array $in, $db, bool $birimKisitli, array $izinliB
         }
 
         $qp = [$bas, $bit];
-        if ($bayiAd    !== null) $qp[] = $bayiAd;
-        if ($bayiAnaAd !== null) $qp[] = $bayiAnaAd;
+        if ($altbayiId) $qp[] = $altbayiId;
         $durumFilter = '';
         if ($outlet !== '') { $durumFilter .= " AND r.IrisRapor_GuncelOutletDurum = ?"; $qp[] = $outlet; }
         if ($satis  !== '') { $durumFilter .= " AND r.IrisRapor_SatisDurumu = ?";       $qp[] = $satis; }
@@ -568,7 +541,7 @@ function hakedisIrisKayitlari(array $in, $db, bool $birimKisitli, array $izinliB
                 r.IrisRapor_TalebiGirenPersonel,
                 r.IrisRapor_TalebiGirenPersonelKodu,
                 r.IrisRapor_TalebiGirenPersonelNo,
-                r.IrisRapor_TalebiGirenPersonelAltbayi,
+                ISNULL(r.IrisRapor_TalebiGirenPersonelAltbayi, ab.altbayiAd) AS IrisRapor_TalebiGirenPersonelAltbayi,
                 r.IrisRapor_Kampanya,
                 r.IrisRapor_Paket,
                 r.IrisRapor_SatisDurumu,
@@ -586,15 +559,7 @@ function hakedisIrisKayitlari(array $in, $db, bool $birimKisitli, array $izinliB
                 r.IrisRapor_UyduBasvuruUyeNo,
                 r.IrisRapor_UyduBasvuruPotansiyelNo
             FROM dbo.DigiturkIrisRapor r
-            OUTER APPLY (
-                SELECT TOP 1 a.DigiturkAltBayiler_Id AS altbayiId,
-                             an.DigiturkAnaBayiler_Ad AS anaBayiAd
-                FROM DigiturkAltBayiler a
-                LEFT JOIN DigiturkAnaBayiler an ON an.DigiturkAnaBayiler_Id = a.DigiturkAltBayiler_AnaBayiId
-                WHERE a.DigiturkAltBayiler_Ad = r.IrisRapor_TalebiGirenPersonelAltbayi AND a.Durum = 1
-                ORDER BY CASE WHEN an.DigiturkAnaBayiler_Ad = r.IrisRapor_TalebiGirenBayiAdi THEN 0 ELSE 1 END,
-                         a.DigiturkAltBayiler_Id DESC
-            ) ab
+            " . hakedisAltBayiApply() . "
             OUTER APPLY (
                 SELECT TOP 1 kb.KullaniciBirim_Adi AS birim, kb.KullaniciBirim_id AS birimId
                 FROM KullaniciBirimYetkileri kby

@@ -16,8 +16,9 @@
  *    Alt bayi bir skala grubuna üyeyse (hakedis-tanimlama > Alt Bayi Eşleştirme) grup üyelerinin
  *    adetleri toplanır ve kademe bu toplamdan bulunur; fiyat yine bayinin kendi tanımından okunur.
  *  - Hakediş: kampanya_adedi × (alt bayi + dönem + kampanya + kademe) tutarı (DigiturkHakedisTanimlari).
- *  - Alt bayi eşleşmesi: IrisRapor_TalebiGirenPersonelAltbayi = DigiturkAltBayiler_Ad;
- *    aynı ada sahip birden çok bayi varsa IrisRapor_TalebiGirenBayiAdi = DigiturkAnaBayiler_Ad ile ayrılır.
+ *  - Alt bayi eşleşmesi (HakedisHesap.php → hakedisAltBayiApply): IrisRapor_TalebiGirenPersonelAltbayi = DigiturkAltBayiler_Ad;
+ *    aynı ada sahip birden çok bayi varsa talebi giren bayi kodu/adı ile ana bayisi örtüşen seçilir.
+ *    Alt bayi adı boşsa (ana bayinin kendi personeli) talebi giren bayi koduna sahip ana bayinin alt bayisi alınır.
  */
 
 require_once __DIR__ . '/../auth.php';
