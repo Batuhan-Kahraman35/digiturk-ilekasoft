@@ -77,3 +77,6 @@ yarn.lock
 .env
 .env.local
 .env.*.local
+
+# Referans arşiv (Digiturk dokümanları, mail taslakları): git'e girmez, web.config ile web'den engelli
+docs/arsiv/
