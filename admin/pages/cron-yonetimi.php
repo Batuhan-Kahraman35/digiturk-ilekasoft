@@ -50,9 +50,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             exit;
         }
 
+        // Sıra kolonları (CronGorevler_Sira / CronZamanlamalar_Sira) eklenmemişse Id sırası kullanılır
+        $siraVar = (bool)($db->fetchOne("SELECT CASE WHEN COL_LENGTH('dbo.CronGorevler','CronGorevler_Sira') IS NOT NULL
+                                                      AND COL_LENGTH('dbo.CronZamanlamalar','CronZamanlamalar_Sira') IS NOT NULL THEN 1 ELSE 0 END AS v")['v'] ?? 0);
+
+        // ── Sıra kaydet (sürükle-bırak) ────────────────────────────────────
+        if ($action === 'sira_kaydet') {
+            if (!$pagePermissions['can_edit']) throw new Exception('Düzenleme yetkiniz yok.');
+            if (!$siraVar) throw new Exception('Sıra kolonları henüz eklenmemiş.');
+            $tur = $_POST['tur'] ?? '';
+            $ids = array_values(array_filter(array_map('intval', (array)($_POST['ids'] ?? []))));
+            if (!$ids) throw new Exception('Sıra listesi boş.');
+            [$tablo, $kolon, $idKolon] = match ($tur) {
+                'gorev'     => ['CronGorevler',     'CronGorevler_Sira',     'CronGorevler_Id'],
+                'zamanlama' => ['CronZamanlamalar', 'CronZamanlamalar_Sira', 'CronZamanlamalar_Id'],
+                default     => throw new Exception('Geçersiz sıra türü.'),
+            };
+            foreach ($ids as $i => $id) {
+                $db->update($tablo, [$kolon => ($i + 1) * 10], [$idKolon => $id]);
+            }
+            echo json_encode(['success' => true, 'message' => 'Sıra kaydedildi.']);
+            exit;
+        }
+
         // ── Görev + Zamanlayıcı listesi ────────────────────────────────────
         if ($action === 'gorev_listele') {
-            $gorevler = $db->fetchAll("SELECT CronGorevler_Id, CronGorevler_Ad, CronGorevler_Aciklama, CronGorevler_GorevKodu, CronGorevler_Parametreler, CronGorevler_HataTalebi, Durum FROM CronGorevler ORDER BY CronGorevler_Id");
+            $gSira = $siraVar ? 'ISNULL(CronGorevler_Sira, 999999), ' : '';
+            $zSira = $siraVar ? 'ISNULL(z.CronZamanlamalar_Sira, 999999), ' : '';
+            // Pasif görevler (birleşik göreve taşınanlar dahil) listelenmez
+            $gorevler = $db->fetchAll("SELECT CronGorevler_Id, CronGorevler_Ad, CronGorevler_Aciklama, CronGorevler_GorevKodu, CronGorevler_Parametreler, CronGorevler_HataTalebi, Durum FROM CronGorevler WHERE Durum = 1 ORDER BY {$gSira}CronGorevler_Id");
             foreach ($gorevler as &$g) {
                 $g['Zamanlamalar'] = $db->fetchAll("
                     SELECT z.CronZamanlamalar_Id, z.CronZamanlamalar_Ad, z.CronZamanlamalar_CronIfadesi,
@@ -72,10 +98,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         ORDER BY CronCalismaLog_Id DESC
                     ) l
                     WHERE z.CronZamanlamalar_GorevId = ?
-                    ORDER BY z.CronZamanlamalar_Id
+                    ORDER BY {$zSira}z.CronZamanlamalar_Id
                 ", [$g['CronGorevler_Id']]);
             }
-            echo json_encode(['success' => true, 'data' => $gorevler]);
+            echo json_encode(['success' => true, 'data' => $gorevler, 'sira_var' => $siraVar]);
             exit;
         }
 
@@ -297,6 +323,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         .z-table th { white-space: nowrap; font-size:.82rem; }
         .z-table td { font-size:.82rem; vertical-align:middle; }
         .runner-url { font-size:.78rem; word-break:break-all; }
+        .sira-tutamac { cursor: grab; color:#adb5bd; padding: 0 4px; }
+        .sira-tutamac:hover { color:#0d6efd; }
+        .sortable-ghost { opacity:.4; background:#e7f1ff !important; }
         /* Çoklu seçim (ör. tüm kurulum bayileri) modalı uzatmasın */
         .modal .select2-container--bootstrap-5 .select2-selection--multiple { max-height: 160px; overflow-y: auto; }
     </style>
@@ -387,6 +416,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                         <!-- Görevler Sekmesi -->
                         <div class="tab-pane fade show active p-3" id="pane-gorevler">
+                            <div class="alert alert-warning border py-2 small mb-3">
+                                <i class="bi bi-exclamation-triangle-fill me-1"></i>
+                                <strong>Not:</strong> Aynı entegrasyona ait işler için <u>ayrı görev tanımlanmaz</u>.
+                                Meta işleri <span class="cron-code">meta_islemler</span>, IRIS işleri <span class="cron-code">iris_islemler</span>, WhatsApp bildirimleri <span class="cron-code">bildirim_islemler</span>, VoIP işleri <span class="cron-code">voip_islemler</span>
+                                görevinin altına, <span class="cron-code">islem</span> parametresi seçilmiş yeni bir <strong>zamanlayıcı</strong> olarak eklenir.
+                                Yeni bir iş türü gerekiyorsa ilgili birleşik görevin <span class="cron-code">islem</span> seçeneklerine eklenir.
+                            </div>
                             <div id="gorevListesi"></div>
                         </div>
 
@@ -566,6 +602,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <script src="https://cdn.datatables.net/1.13.7/js/dataTables.bootstrap5.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11/dist/sweetalert2.all.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.6/Sortable.min.js"></script>
 <script src="/Admin/assets/js/custom.js"></script>
 
 <script>
@@ -659,11 +696,32 @@ function gorevleriYukle() {
     $.post(PAGE_URL, { action: 'gorev_listele' }, function (r) {
         if (!r.success) { showToast('Görevler yüklenemedi.', 'error'); return; }
         gorevler = r.data;
+        siraVar  = !!r.sira_var && canEdit;
         tumZamanlamalar = [];
         r.data.forEach(g => (g.Zamanlamalar || []).forEach(z => tumZamanlamalar.push({ id: z.CronZamanlamalar_Id, ad: z.CronZamanlamalar_Ad, gorevId: g.CronGorevler_Id })));
         renderGorevler(r.data);
         doldurGorevFiltre(r.data);
+        siralamaKur();
     });
+}
+
+// ─── Sürükle-bırak sıralama (görev kartları + her kartın zamanlayıcıları) ─────
+let siraVar = false;
+function siralamaKur() {
+    if (!siraVar || typeof Sortable === 'undefined') return;
+    const kaydet = (tur, ids) => $.post(PAGE_URL, { action: 'sira_kaydet', tur, ids }, function (r) {
+        if (r.success) showToast(r.message, 'success');
+        else { showToast(r.message, 'error'); gorevleriYukle(); }
+    }).fail(() => { showToast('Sıra kaydedilemedi.', 'error'); gorevleriYukle(); });
+
+    Sortable.create(document.getElementById('gorevListesi'), {
+        handle: '.gorev-tutamac', draggable: '.gorev-kart', animation: 150, ghostClass: 'sortable-ghost',
+        onEnd: e => { if (e.oldIndex !== e.newIndex) kaydet('gorev', $('#gorevListesi > .gorev-kart').map((i, el) => el.dataset.id).get()); }
+    });
+    document.querySelectorAll('#gorevListesi tbody.z-sira').forEach(tb => Sortable.create(tb, {
+        handle: '.z-tutamac', draggable: 'tr[data-id]', animation: 150, ghostClass: 'sortable-ghost',
+        onEnd: e => { if (e.oldIndex !== e.newIndex) kaydet('zamanlama', $(tb).children('tr[data-id]').map((i, el) => el.dataset.id).get()); }
+    }));
 }
 
 function renderGorevler(data) {
@@ -692,8 +750,8 @@ function renderGorevler(data) {
 
             const bitisStr = z.Bitis ? `<br><small class="text-danger">↩ ${z.Bitis}</small>` : '<br><small class="text-muted">Sürekli</small>';
 
-            return `<tr class="${z.Durum ? '' : 'table-secondary text-muted'}">
-                <td><span class="fw-semibold">${esc(z.CronZamanlamalar_Ad)}</span>${z.Durum ? '' : ' <span class="badge bg-secondary">Durduruldu</span>'}</td>
+            return `<tr data-id="${z.CronZamanlamalar_Id}" class="${z.Durum ? '' : 'table-secondary text-muted'}">
+                <td>${siraVar ? '<i class="bi bi-grip-vertical sira-tutamac z-tutamac" title="Sürükleyerek sırala"></i>' : ''}<span class="fw-semibold">${esc(z.CronZamanlamalar_Ad)}</span>${z.Durum ? '' : ' <span class="badge bg-secondary">Durduruldu</span>'}</td>
                 <td><span class="cron-code">${esc(z.CronZamanlamalar_CronIfadesi)}</span>${Number(z.CronZamanlamalar_TelafiDakika) > 0
                     ? ` <span class="badge bg-info-subtle text-info-emphasis" title="Kaçan tur ${z.CronZamanlamalar_TelafiDakika} dk içinde telafi edilir"><i class="bi bi-arrow-clockwise"></i> telafi</span>` : ''}</td>
                 <td class="small">${esc(z.Baslangic || '—')}${bitisStr}</td>
@@ -713,9 +771,10 @@ function renderGorevler(data) {
             : '';
 
         $el.append(`
-        <div class="card mb-3 border-${g.Durum ? 'primary' : 'secondary'}">
+        <div class="card mb-3 gorev-kart border-${g.Durum ? 'primary' : 'secondary'}" data-id="${g.CronGorevler_Id}">
             <div class="card-header d-flex justify-content-between align-items-center py-2 bg-light">
                 <div>
+                    ${siraVar ? '<i class="bi bi-grip-vertical sira-tutamac gorev-tutamac fs-5 align-middle" title="Sürükleyerek görevi sırala"></i>' : ''}
                     <span class="fw-bold">${esc(g.CronGorevler_Ad)}</span>
                     <span class="cron-code ms-2">${esc(g.CronGorevler_GorevKodu)}</span>
                     ${g.CronGorevler_Aciklama ? `<span class="text-muted small ms-2">${esc(g.CronGorevler_Aciklama)}</span>` : ''}
@@ -733,7 +792,7 @@ function renderGorevler(data) {
             <div class="card-body p-0">
                 <table class="table table-bordered table-sm mb-0 z-table">
                     <thead class="table-light"><tr><th>Zamanlayıcı Adı</th><th>Cron İfadesi</th><th>Başlangıç / Bitiş</th><th>Son Çalışma</th><th>Durum</th><th style="width:150px">İşlem</th></tr></thead>
-                    <tbody>${zSatirlar}</tbody>
+                    <tbody class="z-sira">${zSatirlar}</tbody>
                 </table>
             </div>
         </div>`);

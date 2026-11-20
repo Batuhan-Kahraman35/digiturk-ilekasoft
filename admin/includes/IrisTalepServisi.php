@@ -315,7 +315,9 @@ function irisPersonelCoz($db, ?int $anaBayiId): int
                 ON p.DigiturkAltBayiPersonel_Id =
                    TRY_CAST(JSON_VALUE(z.CronZamanlamalar_SabitParametreler, '$.personel_id') AS INT)
         INNER JOIN DigiturkAltBayiler a ON a.DigiturkAltBayiler_Id = p.DigiturkAltBayiPersonel_AltBayiId
-        WHERE g.CronGorevler_GorevKodu = 'iris_rapor'
+        WHERE (g.CronGorevler_GorevKodu = 'iris_rapor'
+               OR (g.CronGorevler_GorevKodu = 'iris_islemler'
+                   AND JSON_VALUE(z.CronZamanlamalar_SabitParametreler, '$.islem') = 'rapor'))
           AND z.Durum = 1 AND p.Durum = 1
           AND a.DigiturkAltBayiler_AnaBayiId = ?
         ORDER BY z.CronZamanlamalar_Id", [$anaBayiId]);

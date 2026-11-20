@@ -848,6 +848,24 @@ function gorevTokenGuncelle(array $params, $db): array
         if ($anaSecim !== '') $sonuc .= ' | ' . anaBayiSifreKontrol($db, $anaSecim)['ozet'];
 
         $durum = ($hatali > 0 && $basarili === 0) ? 2 : 1;
+
+        // Son 24 saatte şifre kilidine düşen personel → görev hatalı döner, hata talebi açılır.
+        // Kilit anında SonLoginTarihi yazıldığı için kalıcı kilitliler sonraki günlerde tekrar bildirilmez.
+        // Pencere 24 sa + 10 dk: sınırdaki çift bildirimi cronHataTalebiAc'ın 24 saatlik tekrar kontrolü engeller.
+        $yeniKilit = $db->fetchAll("
+            SELECT p.DigiturkAltBayiPersonel_Id AS id, p.DigiturkAltBayiPersonel_KullaniciAdi AS kullanici,
+                   p.DigiturkAltBayiPersonel_LoginHataMesaji AS mesaj
+            FROM DigiturkAltBayiPersonel p
+            WHERE p.Durum = 1 AND p.DigiturkAltBayiPersonel_LoginKilitSifreli = 1
+              AND p.DigiturkAltBayiPersonel_SonLoginTarihi >= DATEADD(MINUTE, -1450, GETDATE())
+            ORDER BY p.DigiturkAltBayiPersonel_Id") ?: [];
+        if ($yeniKilit) {
+            $durum  = 2;
+            $sonuc .= ' | YENİ ŞİFRE KİLİDİ (' . count($yeniKilit) . '): ' . implode('; ', array_map(
+                fn($k) => "#{$k['id']} {$k['kullanici']}: " . mb_substr((string)$k['mesaj'], 0, 120), $yeniKilit))
+                . ' → Şifre Digiturk tarafında yenilenip Bayi Yönetimi → Personel sekmesinden güncellenmeli.';
+            echo "  ⚠ Son 24 saatte şifre kilidine düşen personel: " . count($yeniKilit) . "\n";
+        }
     } catch (Throwable $e) { $sonuc = get_class($e) . ': ' . $e->getMessage(); $durum = 2; }
 
     return ['durum' => $durum, 'sonuc' => $sonuc, 'cikti' => ob_get_clean()];
@@ -1713,6 +1731,7 @@ function bayiRaporGorselCiz(array $satis, array $kurulum, array $onay, array $vo
  *         telefon (virgüllü liste), saat_bas (0-23), saat_bitis (0-23),
  *         ana_bayiler (opsiyonel; DigiturkAnaBayiler_Id virgüllü, "*" = tüm aktif, boş = filtre yok),
  *         gruplama (opsiyonel; boş/"birim" = alt bayi adı, "personel" = talebi giren personel)
+ *         bos_gonder (opsiyonel; "1" = satış/kurulum/onay yokken de boş rapor gider, vars. gönderilmez)
  */
 function gorevWhatsappRaporBildir(array $params, $db): array
 {
@@ -1812,6 +1831,12 @@ function gorevWhatsappRaporBildir(array $params, $db): array
         $satis   = $pivot("CAST(IrisRapor_TalepGirisTarihi AS DATE) BETWEEN ? AND ?");
         $kurulum = $pivot("CAST(IrisRapor_MemoKapanisTarihi AS DATE) BETWEEN ? AND ? AND IrisRapor_SatisDurumu = 'Tamamlandı'");
         $onay    = $pivot("CAST(IrisRapor_TalepGirisTarihi AS DATE) BETWEEN ? AND ? AND IrisRapor_TeyitDurum = 'ONAYLANDI'");
+
+        // Veri yoksa gönderme (bos_gonder=1 ile boş rapor da gider)
+        if (!$satis && !$kurulum && !$onay && ($params['bos_gonder'] ?? '0') !== '1') {
+            echo "  Satış, kurulum ve onay kaydı yok, gönderim yapılmadı.\n";
+            return ['durum' => 1, 'sonuc' => "{$tarihDisplay}: rapor verisi yok, gönderim yapılmadı.", 'cikti' => ob_get_clean()];
+        }
 
         // VOIP gideri birim bazlı, ana bayiye bağlanamıyor → filtreli raporda gösterilmez
         $voip = $bayiFiltre === '' ? voipGunlukUcret($db, $tarih, $bitis) : [];
@@ -2041,13 +2066,26 @@ function gorevMetaEksikLead(array $params, $db): array
         $gun = max(1, min(90, (int)($params['gun'] ?? 3)));
         $bas = time() - $gun * 86400;
 
+        // Graph erişim hatalı (kapalı / token ölü) açık kısıtlama olayı olan sayfanın formları atlanır; olay kapanınca tekrar taranır.
+        // UNPUBLISHED sayfalar atlanmaz: token geçerli kaldığı için formları okunabiliyor.
         $formlar = $db->fetchAll("
-            SELECT f.ReklamLeadFormlari_id AS id, f.ReklamLeadFormlari_FormAdi AS ad
+            SELECT f.ReklamLeadFormlari_id AS id, f.ReklamLeadFormlari_FormAdi AS ad,
+                   s.ReklamFacebookSayfalari_id AS sayfa_id,
+                   CASE WHEN EXISTS (
+                       SELECT 1 FROM MetaKisitlamaOlaylari o
+                       INNER JOIN tanim_MetaOlayDurumlari d ON d.tanim_MetaOlayDurumlari_id = o.MetaKisitlamaOlaylari_OlayDurumu_id
+                       WHERE o.MetaKisitlamaOlaylari_FacebookSayfa_id = s.ReklamFacebookSayfalari_id
+                         AND o.Durum = 1 AND d.tanim_MetaOlayDurumlari_Kapanis = 0
+                         AND o.MetaKisitlamaOlaylari_MetaKodu LIKE 'GRAPH%'
+                   ) THEN 1 ELSE 0 END AS kisitli
             FROM ReklamLeadFormlari f
             INNER JOIN ReklamFacebookSayfalari s ON s.ReklamFacebookSayfalari_id = f.ReklamLeadFormlari_Sayfa_id AND s.Durum = 1
             WHERE f.Durum = 1 AND f.ReklamLeadFormlari_FormID NOT LIKE '%[^0-9]%'
             ORDER BY f.ReklamLeadFormlari_id
         ");
+        $atlanan = array_filter($formlar, fn($f) => (int)$f['kisitli'] === 1);
+        $formlar = array_values(array_filter($formlar, fn($f) => (int)$f['kisitli'] === 0));
+        $atlananSayfa = count(array_unique(array_column($atlanan, 'sayfa_id')));
 
         $top = ['bulunan' => 0, 'eklendi' => 0, 'kural' => 0, 'karaliste' => 0, 'graph' => 0, 'hata' => 0];
         $okunan = 0; $okunamayan = 0;
@@ -2076,6 +2114,7 @@ function gorevMetaEksikLead(array $params, $db): array
             'Son %d gün, %d form tarandı (%d okunamadı): %d lead bulundu, %d eklendi, %d kurala, %d kara listeye takıldı, %d hata.',
             $gun, $okunan, $okunamayan, $top['bulunan'], $top['eklendi'], $top['kural'], $top['karaliste'], $top['graph'] + $top['hata']
         );
+        if ($atlanan) $sonuc .= sprintf(' Kısıtlı %d sayfanın %d formu atlandı.', $atlananSayfa, count($atlanan));
         $durum = ($formlar && $okunan === 0) ? 2 : 1;
     } catch (Throwable $e) {
         $sonuc = get_class($e) . ': ' . $e->getMessage();
@@ -2285,6 +2324,44 @@ function gorevMetaLeadSaglik(array $params, $db): array
     }
 
     return ['durum' => $durum, 'sonuc' => ($isDry ? '[DRY] ' : '') . $sonuc, 'cikti' => ob_get_clean()];
+}
+
+/**
+ * Satış (Başvuru Durumu TAMAM) ve kurulum (Süreç Tamamlandı) bilgisini reklam platformuna bildirir.
+ * Şimdilik yalnız Meta (Conversions API, lead numarasıyla). Gönderilenler ReklamDonusumOlaylari'na
+ * yazılır; başarısızlar sonraki turda yeniden denenir. dry=1: hiçbir şey gönderilmez/yazılmaz.
+ */
+function gorevReklamDonusumBildir(array $params, $db): array
+{
+    ob_start();
+    set_time_limit(900);
+
+    $isDry = !empty($params['dry']);
+    try {
+        require_once dirname(__DIR__) . '/admin/includes/ReklamDonusumBildir.php';
+
+        $r = ReklamDonusumBildir::calistir($db, $params, $isDry);
+        if ($isDry) echo "  [DRY] Gönderim ve kayıt yapılmadı.\n";
+
+        $parca = [];
+        foreach ($r['sayac'] as $asama => $s) {
+            $parca[] = $isDry
+                ? "{$asama}: {$s['aday']} aday"
+                : "{$asama}: {$s['aday']} aday, {$s['gonderildi']} gönderildi, {$s['hata']} hata";
+            foreach ($r['ornek'][$asama] ?? [] as $o) {
+                echo "  {$asama} örnek: başvuru #{$o['id']}, lead {$o['leadgen']}, tarih " . ($o['tarih'] ?? '-') . "\n";
+            }
+        }
+        $platform = $params['platform'] ?? 'Meta';
+        $sonuc = ($isDry ? '[DRY] ' : '') . "{$platform} → " . ($parca ? implode(' | ', $parca) : 'aday yok')
+               . ($r['hata'] ? ' | Son hata: ' . $r['hata'] : '');
+        $durum = ($r['hata'] && !array_sum(array_column($r['sayac'], 'gonderildi'))) ? 2 : 1;
+    } catch (Throwable $e) {
+        $sonuc = get_class($e) . ': ' . $e->getMessage();
+        $durum = 2;
+    }
+
+    return ['durum' => $durum, 'sonuc' => $sonuc, 'cikti' => ob_get_clean()];
 }
 
 function gorevMetaGunlukHarcamaOdeme(array $params, $db): array
@@ -2807,6 +2884,12 @@ function gorevHakedisGrubaBildir(array $params, $db): array
 
         $L('Ödemeler: ' . count($odemeler) . ' tür kalemi | Net: ' . number_format($netOdeme, 0, ',', '.')
             . ' ₺ | Bakiye: ' . number_format($guncelBakiye, 0, ',', '.') . ' ₺');
+
+        // Veri yoksa gönderme: ödemeler dönemden bağımsız kümülatif olduğu için ölçüt yalnız haftalık + aylık adet
+        if ((int)$haftalik['adet'] === 0 && (int)$aylik['adet'] === 0 && ($params['bos_gonder'] ?? '0') !== '1') {
+            $L('Haftalık ve aylık hakediş adedi 0, gönderim yapılmadı.');
+            return ['durum' => 1, 'sonuc' => "{$birimAdi}: hakediş verisi yok, gönderim yapılmadı.", 'cikti' => ob_get_clean()];
+        }
 
         // ── Mesajı kur (düz WhatsApp metni; tutarlar kuruşsuz + binlik ayraçlı) ──
         $fmt = fn(float $v) => number_format(round($v), 0, ',', '.');
@@ -5029,6 +5112,61 @@ function gorevVoipIslemler(array $params, $db): array
 }
 
 /**
+ * Birleşik bildirim görevi: islem parametresine göre WhatsApp satış raporu / hakediş / kurulum randevu /
+ * IRIS iptal bildirimini çalıştırır. Her bildirim ayrı zamanlayıcıyla (SabitParametreler.islem) tetiklenir.
+ * Yeni bir bildirim türü eklenecekse ayrı CronGorevler kaydı açılmaz; buraya yeni islem değeri eklenir.
+ */
+function gorevBildirimIslemler(array $params, $db): array
+{
+    $islem = strtolower(trim($params['islem'] ?? ''));
+    return match($islem) {
+        'rapor'   => gorevWhatsappRaporBildir($params, $db),
+        'hakedis' => gorevHakedisGrubaBildir($params, $db),
+        'randevu' => gorevKurulumBayiRandevuBildir($params, $db),
+        'iptal'   => gorevIrisIptalBildir($params, $db),
+        default   => ['durum' => 2, 'sonuc' => "Geçersiz bildirim işlemi: '{$islem}' (rapor | hakedis | randevu | iptal)", 'cikti' => ''],
+    };
+}
+
+/**
+ * Birleşik IRIS görevi: islem parametresine göre token / rapor / süreç / eşleştirme işlemini çalıştırır.
+ * Her işlem ayrı zamanlayıcıyla (SabitParametreler.islem) tetiklenir.
+ * Yeni bir IRIS işi eklenecekse ayrı CronGorevler kaydı açılmaz; buraya yeni islem değeri eklenir.
+ * Not: irisPersonelCoz() (IrisTalepServisi.php) islem=rapor zamanlayıcılarının personel_id'sini okur.
+ */
+function gorevIrisIslemler(array $params, $db): array
+{
+    $islem = strtolower(trim($params['islem'] ?? ''));
+    return match($islem) {
+        'token'    => gorevTokenGuncelle($params, $db),
+        'rapor'    => gorevIrisRapor($params, $db),
+        'surec'    => gorevBasvuruSurecGuncelle($params, $db),
+        'eslestir' => gorevIrisTalepEslestir($params, $db),
+        default    => ['durum' => 2, 'sonuc' => "Geçersiz IRIS işlemi: '{$islem}' (token | rapor | surec | eslestir)", 'cikti' => ''],
+    };
+}
+
+/**
+ * Birleşik Meta görevi: islem parametresine göre senkron / harcama / borç / kısıtlama / eksik lead /
+ * lead sağlık işlemini çalıştırır. Her işlem ayrı zamanlayıcıyla (SabitParametreler.islem) tetiklenir.
+ * Yeni bir Meta işi eklenecekse ayrı CronGorevler kaydı açılmaz; buraya yeni islem değeri eklenir.
+ */
+function gorevMetaIslemler(array $params, $db): array
+{
+    $islem = strtolower(trim($params['islem'] ?? ''));
+    return match($islem) {
+        'senkron'    => gorevMetaReklamSenkronize($params, $db),
+        'harcama'    => gorevMetaGunlukHarcamaOdeme($params, $db),
+        'borc'       => gorevReklamBorcBildir($params, $db),
+        'kisitlama'  => gorevMetaKisitlamaIzle($params, $db),
+        'eksik_lead' => gorevMetaEksikLead($params, $db),
+        'saglik'     => gorevMetaLeadSaglik($params, $db),
+        'donusum'    => gorevReklamDonusumBildir($params, $db),
+        default      => ['durum' => 2, 'sonuc' => "Geçersiz Meta işlemi: '{$islem}' (senkron | harcama | borc | kisitlama | eksik_lead | saglik | donusum)", 'cikti' => ''],
+    };
+}
+
+/**
  * Meta kısıtlama izleme: reklam hesaplarının account_status/disable_reason değerini ve
  * sayfaların erişilebilirliğini Graph'tan kontrol eder; meta-kisitlama-takibi.php olaylarını
  * otomatik açar/kapatır ve değişiklikleri tek mail ile bildirir.
@@ -5270,6 +5408,9 @@ function gorevCalistir(string $gorevKodu, array $params, $db): array
 {
     return match($gorevKodu) {
         'token_guncelle'            => gorevTokenGuncelle($params, $db),
+        'iris_islemler'             => gorevIrisIslemler($params, $db),
+        'bildirim_islemler'         => gorevBildirimIslemler($params, $db),
+        // Eski kodlar: geriye uyumluluk (iris_islemler'e taşındı)
         'iris_rapor'                => gorevIrisRapor($params, $db),
         'basvuru_surec_guncelle'    => gorevBasvuruSurecGuncelle($params, $db),
         'iris_talep_eslestir'       => gorevIrisTalepEslestir($params, $db),
@@ -5279,6 +5420,8 @@ function gorevCalistir(string $gorevKodu, array $params, $db): array
         'voip_gunluk_harcama'       => gorevVoipGunlukHarcama($params, $db),
         'voip_bakiye_kontrol'       => gorevVoipBakiyeKontrol($params, $db),
         'whatsapp_rapor_bildir'     => gorevWhatsappRaporBildir($params, $db),
+        'meta_islemler'             => gorevMetaIslemler($params, $db),
+        // Eski kodlar: geriye uyumluluk (meta_islemler'e taşındı)
         'meta_reklam_senkronize'    => gorevMetaReklamSenkronize($params, $db),
         'meta_gunluk_harcama_odeme' => gorevMetaGunlukHarcamaOdeme($params, $db),
         'reklam_borc_bildir'        => gorevReklamBorcBildir($params, $db),
@@ -5291,7 +5434,8 @@ function gorevCalistir(string $gorevKodu, array $params, $db): array
         'meta_kisitlama_izle'       => gorevMetaKisitlamaIzle($params, $db),
         'meta_eksik_lead'           => gorevMetaEksikLead($params, $db),
         'meta_lead_saglik'          => gorevMetaLeadSaglik($params, $db),
+        'reklam_donusum_bildir'     => gorevReklamDonusumBildir($params, $db),
         'iris_iptal_bildir'         => gorevIrisIptalBildir($params, $db),
-        default                     => throw new RuntimeException("Bilinmeyen görev kodu: {$gorevKodu}"),
+        default                   => throw new RuntimeException("Bilinmeyen görev kodu: {$gorevKodu}"),
     };
 }
