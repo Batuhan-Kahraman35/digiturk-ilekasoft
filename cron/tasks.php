@@ -2066,18 +2066,12 @@ function gorevMetaEksikLead(array $params, $db): array
         $gun = max(1, min(90, (int)($params['gun'] ?? 3)));
         $bas = time() - $gun * 86400;
 
-        // Graph erişim hatalı (kapalı / token ölü) açık kısıtlama olayı olan sayfanın formları atlanır; olay kapanınca tekrar taranır.
-        // UNPUBLISHED sayfalar atlanmaz: token geçerli kaldığı için formları okunabiliyor.
+        // Askıdaki sayfanın (lead akışını durduran açık olay ya da Graph erişim hatası) formları atlanır;
+        // olay kapanınca tekrar taranır. Kural: MetaLeadIsle::askidaKosulu().
         $formlar = $db->fetchAll("
             SELECT f.ReklamLeadFormlari_id AS id, f.ReklamLeadFormlari_FormAdi AS ad,
                    s.ReklamFacebookSayfalari_id AS sayfa_id,
-                   CASE WHEN EXISTS (
-                       SELECT 1 FROM MetaKisitlamaOlaylari o
-                       INNER JOIN tanim_MetaOlayDurumlari d ON d.tanim_MetaOlayDurumlari_id = o.MetaKisitlamaOlaylari_OlayDurumu_id
-                       WHERE o.MetaKisitlamaOlaylari_FacebookSayfa_id = s.ReklamFacebookSayfalari_id
-                         AND o.Durum = 1 AND d.tanim_MetaOlayDurumlari_Kapanis = 0
-                         AND o.MetaKisitlamaOlaylari_MetaKodu LIKE 'GRAPH%'
-                   ) THEN 1 ELSE 0 END AS kisitli
+                   CASE WHEN " . MetaLeadIsle::askidaKosulu('s.ReklamFacebookSayfalari_id') . " THEN 1 ELSE 0 END AS kisitli
             FROM ReklamLeadFormlari f
             INNER JOIN ReklamFacebookSayfalari s ON s.ReklamFacebookSayfalari_id = f.ReklamLeadFormlari_Sayfa_id AND s.Durum = 1
             WHERE f.Durum = 1 AND f.ReklamLeadFormlari_FormID NOT LIKE '%[^0-9]%'
@@ -2149,7 +2143,7 @@ function metaLeadSaglikMetin(array $s, string $ilk, string $simdi): string
  * webhook aboneliği ve panele düşmeyen lead durumunu kontrol eder (MetaLeadIsle::leadSaglik).
  * Sorun ardışık esik_tur tur sürerse destek talebi açar, sürdükçe tekrar_saat'te bir hatırlatır,
  * sorun türü değişince ya da düzelince talebe yazar. Durum EntegrasyonLoglari'nda (Tip='meta_lead_saglik',
- * Alici=SayfaID) tutulur. Açık GRAPH kısıtlama olayı olan sayfa atlanır (meta_kisitlama_izle bildiriyor).
+ * Alici=SayfaID) tutulur. Askıdaki sayfa (MetaLeadIsle::askidaKosulu) atlanır (meta_kisitlama_izle bildiriyor).
  *
  * params: kullanici_id (zorunlu), kategori_id, oncelik_id, esik_tur (2), tekrar_saat (6),
  *         aktif_gun (14), saat (24), eksik_dk (240), sayfa (tek SayfaID), dry (1 = talep/log yok)
@@ -2183,13 +2177,7 @@ function gorevMetaLeadSaglik(array $params, $db): array
         $tekSayfa = trim((string)($params['sayfa'] ?? ''));
         $sayfalar = $db->fetchAll("
             SELECT s.ReklamFacebookSayfalari_SayfaID AS ext, s.ReklamFacebookSayfalari_SayfaAdi AS ad,
-                   CASE WHEN EXISTS (
-                       SELECT 1 FROM MetaKisitlamaOlaylari o
-                       INNER JOIN tanim_MetaOlayDurumlari d ON d.tanim_MetaOlayDurumlari_id = o.MetaKisitlamaOlaylari_OlayDurumu_id
-                       WHERE o.MetaKisitlamaOlaylari_FacebookSayfa_id = s.ReklamFacebookSayfalari_id
-                         AND o.Durum = 1 AND d.tanim_MetaOlayDurumlari_Kapanis = 0
-                         AND o.MetaKisitlamaOlaylari_MetaKodu LIKE 'GRAPH%'
-                   ) THEN 1 ELSE 0 END AS kisitli
+                   CASE WHEN " . MetaLeadIsle::askidaKosulu('s.ReklamFacebookSayfalari_id') . " THEN 1 ELSE 0 END AS kisitli
             FROM ReklamFacebookSayfalari s
             WHERE s.Durum = 1 AND s.ReklamFacebookSayfalari_SayfaID NOT LIKE '%[^0-9]%' AND s.ReklamFacebookSayfalari_SayfaID <> ''
               AND (? <> '' AND s.ReklamFacebookSayfalari_SayfaID = ? OR ? = '' AND EXISTS (
@@ -2233,7 +2221,7 @@ function gorevMetaLeadSaglik(array $params, $db): array
         $say = ['saglikli' => 0, 'sorunlu' => 0, 'atlanan' => 0, 'acilan' => 0, 'yanit' => 0, 'duzelen' => 0];
         foreach ($sayfalar as $sp) {
             $ext = (string)$sp['ext'];
-            if ((int)$sp['kisitli'] === 1) { $say['atlanan']++; $L("- {$sp['ad']} ($ext): açık Meta kısıtlama olayı var, atlandı."); continue; }
+            if ((int)$sp['kisitli'] === 1) { $say['atlanan']++; $L("- {$sp['ad']} ($ext): sayfa askıda (açık Meta kısıtlama olayı), atlandı."); continue; }
 
             $s     = MetaLeadIsle::leadSaglik($db, $ext, $kontrol);
             $kod   = $s['kodlar'][0] ?? null;

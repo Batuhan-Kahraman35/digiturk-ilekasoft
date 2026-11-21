@@ -68,6 +68,26 @@ class MetaLeadIsle
         return (string)($r['data']['error']['message'] ?? ($r['hata'] ?: 'HTTP ' . $r['kod']));
     }
 
+    /**
+     * Sayfa askıda mı (SQL EXISTS ifadesi). Açık (kapanış durumunda olmayan) olay, türü lead akışını
+     * durduran (tanim_MetaOlayTurleri_LeadAkisiDurur = 1) ya da Graph erişim hatası (MetaKodu GRAPH%) ise askıda sayılır.
+     * Askıdaki sayfanın formları eksik lead / sağlık taramasında atlanır, olay kapanınca kendiliğinden geri gelir.
+     * Durum alanına dokunulmaz: pasif form lead almaz, askı kalkınca gelen lead'ler kaybolmasın.
+     *
+     * @param string $sayfaIdIfade ReklamFacebookSayfalari_id veren SQL ifadesi (ör. 's.ReklamFacebookSayfalari_id')
+     */
+    public static function askidaKosulu(string $sayfaIdIfade): string
+    {
+        return "EXISTS (
+            SELECT 1 FROM MetaKisitlamaOlaylari ako
+            INNER JOIN tanim_MetaOlayDurumlari akd ON akd.tanim_MetaOlayDurumlari_id = ako.MetaKisitlamaOlaylari_OlayDurumu_id
+            LEFT JOIN tanim_MetaOlayTurleri akt ON akt.tanim_MetaOlayTurleri_id = ako.MetaKisitlamaOlaylari_OlayTuru_id
+            WHERE ako.MetaKisitlamaOlaylari_FacebookSayfa_id = {$sayfaIdIfade}
+              AND ako.Durum = 1 AND akd.tanim_MetaOlayDurumlari_Kapanis = 0
+              AND (akt.tanim_MetaOlayTurleri_LeadAkisiDurur = 1 OR ako.MetaKisitlamaOlaylari_MetaKodu LIKE 'GRAPH%')
+        )";
+    }
+
     /** Graph URL'i: token + appsecret_proof eklenmiş. */
     private static function url(array $baglam, string $yol, array $params = []): string
     {

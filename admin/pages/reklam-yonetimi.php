@@ -513,7 +513,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                            INNER JOIN KullaniciBirim kb ON kby.KullaniciBirimYetkileri_Birim_id = kb.KullaniciBirim_id
                           WHERE kby.KullaniciBirimYetkileri_ReklamSayfa_id = s.ReklamFacebookSayfalari_id AND kby.Durum = 1) AS birim_adlari,
                         ISNULL(ld.adet, 0) AS lead_adedi,
-                        ld.son              AS son_lead
+                        ld.son              AS son_lead,
+                        ask.olay_id         AS askida_olay_id,
+                        ask.olay_turu       AS askida_olay_turu,
+                        ask.olay_tarihi     AS askida_tarih,
+                        ask.olay_durumu     AS askida_durum
                     FROM ReklamFacebookSayfalari s
                     LEFT JOIN ReklamKampanyalari k ON s.ReklamFacebookSayfalari_Kampanya_id = k.ReklamKampanyalari_id
                     LEFT JOIN ReklamHesaplari h ON k.ReklamKampanyalari_Hesap_id = h.ReklamHesaplari_id
@@ -524,6 +528,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         INNER JOIN ReklamLeadFormlari lf ON lf.ReklamLeadFormlari_id = b.ReklamLeadFormlari_ID
                         WHERE lf.ReklamLeadFormlari_Sayfa_id = s.ReklamFacebookSayfalari_id
                     ) ld
+                    -- Askı: lead akışını durduran açık olay (kural MetaLeadIsle::askidaKosulu ile aynı)
+                    OUTER APPLY (
+                        SELECT TOP 1 o.MetaKisitlamaOlaylari_id AS olay_id, ot.tanim_MetaOlayTurleri_Adi AS olay_turu,
+                               o.MetaKisitlamaOlaylari_OlayTarihi AS olay_tarihi, od.tanim_MetaOlayDurumlari_Adi AS olay_durumu
+                        FROM MetaKisitlamaOlaylari o
+                        INNER JOIN tanim_MetaOlayDurumlari od ON od.tanim_MetaOlayDurumlari_id = o.MetaKisitlamaOlaylari_OlayDurumu_id
+                        LEFT JOIN tanim_MetaOlayTurleri ot ON ot.tanim_MetaOlayTurleri_id = o.MetaKisitlamaOlaylari_OlayTuru_id
+                        WHERE o.MetaKisitlamaOlaylari_FacebookSayfa_id = s.ReklamFacebookSayfalari_id
+                          AND o.Durum = 1 AND od.tanim_MetaOlayDurumlari_Kapanis = 0
+                          AND (ot.tanim_MetaOlayTurleri_LeadAkisiDurur = 1 OR o.MetaKisitlamaOlaylari_MetaKodu LIKE 'GRAPH%')
+                        ORDER BY o.MetaKisitlamaOlaylari_OlayTarihi DESC
+                    ) ask
                     WHERE " . implode(' AND ', $where) . "
                     ORDER BY s.ReklamFacebookSayfalari_SayfaAdi
                 ", $params);
@@ -2407,6 +2423,13 @@ function aboneBadge(a) {
     if (a == 0) return '<span class="badge text-bg-danger">Abone değil</span>';
     return '<span class="badge text-bg-secondary">Kontrol edilmedi</span>';
 }
+// Askıdaki sayfa: lead akışını durduran açık Meta olayı (formları lead taramasında atlanır)
+function askidaRozet(x) {
+    if (!x.askida_olay_id) return '';
+    const tarih = x.askida_tarih ? String(x.askida_tarih).substring(0, 10) : '';
+    const ipucu = `${x.askida_olay_turu || 'Meta kısıtlaması'} · ${x.askida_durum || ''}${tarih ? ' · ' + tarih : ''} — formları lead taramasında atlanıyor`;
+    return ` <a href="meta-kisitlama-takibi.php" class="badge text-bg-danger text-decoration-none" title="${enc(ipucu).replace(/"/g, '&quot;')}"><i class="bi bi-pause-circle"></i> Askıda</a>`;
+}
 // Webhook (leadgen) yalnızca Meta platformunda anlamlıdır
 function platformMeta(ad) { return (ad || '').toLowerCase().indexOf('meta') !== -1; }
 // Meta account_status kodu → rozet (senkron/kontrol sonrası DB'deki son değer)
@@ -2670,7 +2693,7 @@ function satirHtml(ent, x) {
         const whRozet = isMeta ? aboneBadge(x.ReklamFacebookSayfalari_LeadgenAbone) : '<span class="text-muted">—</span>';
         return `<tr>
             <td>${x.ReklamFacebookSayfalari_id}</td>
-            <td>${enc(x.ReklamFacebookSayfalari_SayfaAdi)}</td>
+            <td>${enc(x.ReklamFacebookSayfalari_SayfaAdi)}${askidaRozet(x)}</td>
             <td>${enc(x.ReklamKampanyalari_KampanyaAdi)}</td>
             <td>${birimBadges(x.birim_adlari)}</td>
             <td><small>${enc(x.ReklamFacebookSayfalari_SayfaID)}</small></td>
