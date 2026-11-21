@@ -74,23 +74,30 @@ function irisMesaj(array $r): string
 /**
  * IRIS talep sorgularında kullanılacak ana bayi hesabını verir.
  *
- * Hesap DigiturkAnaBayiler_IrisTalepVarsayilan bayrağı ile seçilir; sayfadaki
- * "IRIS Sorgularında Kullanılan Hesap" kartından değiştirilebilir.
+ * $anaBayiId verilirse o ana bayi kullanılır (cron zamanlayıcısının ana_bayi_id
+ * parametresi). Verilmezse DigiturkAnaBayiler_IrisTalepVarsayilan bayrağına bakılır;
+ * bayrak sayfadaki "IRIS Sorgularında Kullanılan Hesap" kartından değiştirilir.
  */
-function irisTalepHesabi($db): array
+function irisTalepHesabi($db, ?int $anaBayiId = null): array
 {
-    $hesap = $db->fetchOne("
-        SELECT DigiturkAnaBayiler_Id           AS id,
-               DigiturkAnaBayiler_Ad           AS ad,
-               DigiturkAnaBayiler_BayiKodu     AS bayiKodu,
-               DigiturkAnaBayiler_KullaniciAdi AS kullanici,
-               DigiturkAnaBayiler_Sifre        AS sifre
-        FROM DigiturkAnaBayiler
-        WHERE DigiturkAnaBayiler_IrisTalepVarsayilan = 1 AND Durum = 1");
+    $alanlar = "SELECT DigiturkAnaBayiler_Id           AS id,
+                       DigiturkAnaBayiler_Ad           AS ad,
+                       DigiturkAnaBayiler_BayiKodu     AS bayiKodu,
+                       DigiturkAnaBayiler_KullaniciAdi AS kullanici,
+                       DigiturkAnaBayiler_Sifre        AS sifre
+                FROM DigiturkAnaBayiler";
 
-    if (!$hesap) {
-        throw new RuntimeException('IRIS sorgu hesabı seçilmemiş — sayfadaki '
-            . '"IRIS Sorgularında Kullanılan Hesap" kartından bir ana bayi seçin.');
+    if ($anaBayiId) {
+        $hesap = $db->fetchOne("{$alanlar} WHERE DigiturkAnaBayiler_Id = ? AND Durum = 1", [$anaBayiId]);
+        if (!$hesap) {
+            throw new RuntimeException("IRIS sorgu hesabı bulunamadı veya pasif (ana_bayi_id={$anaBayiId}).");
+        }
+    } else {
+        $hesap = $db->fetchOne("{$alanlar} WHERE DigiturkAnaBayiler_IrisTalepVarsayilan = 1 AND Durum = 1");
+        if (!$hesap) {
+            throw new RuntimeException('IRIS sorgu hesabı seçilmemiş — sayfadaki '
+                . '"IRIS Sorgularında Kullanılan Hesap" kartından bir ana bayi seçin.');
+        }
     }
     if (empty($hesap['kullanici']) || empty($hesap['sifre'])) {
         throw new RuntimeException("IRIS sorgu hesabının kullanıcı adı/şifresi boş ({$hesap['ad']}).");
@@ -106,9 +113,9 @@ function irisTalepHesabi($db): array
  * için SearchRequisition "Kayıt Bulunamadı.." döndüğünden hiçbir eşleştirme
  * yapılamıyordu (tespit: 16.09.2026).
  */
-function irisTalepOturum($db): array
+function irisTalepOturum($db, ?int $anaBayiId = null): array
 {
-    $hesap = irisTalepHesabi($db);
+    $hesap = irisTalepHesabi($db, $anaBayiId);
 
     $ch = curl_init();
     curl_setopt_array($ch, [

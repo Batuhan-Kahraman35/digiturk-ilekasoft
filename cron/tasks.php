@@ -789,7 +789,11 @@ function gorevTokenGuncelle(array $params, $db): array
             FROM DigiturkAltBayiPersonel p
             LEFT JOIN DigiturkAltBayiler a ON p.DigiturkAltBayiPersonel_AltBayiId = a.DigiturkAltBayiler_Id
             LEFT JOIN DigiturkAnaBayiler n ON a.DigiturkAltBayiler_AnaBayiId      = n.DigiturkAnaBayiler_Id
-            WHERE p.Durum = 1" . ($zorla ? "" : "
+            WHERE p.Durum = 1
+              -- Digiturk girişi olmayan personel (ör. IRIS eşleştirmesi için eklenen iç ekip) denenmez;
+              -- aksi halde her turda 'kullanıcı adı, şifre veya bayi kodu eksik' hatası sayılır.
+              AND ISNULL(p.DigiturkAltBayiPersonel_KullaniciAdi, '') <> ''
+              AND ISNULL(p.DigiturkAltBayiPersonel_Sifre, '') <> ''" . ($zorla ? "" : "
               AND (p.DigiturkAltBayiPersonel_Token IS NULL
                 OR p.DigiturkAltBayiPersonel_TokenSuresi IS NULL
                 OR p.DigiturkAltBayiPersonel_TokenSuresi < DATEADD(MINUTE, {$payDk}, GETDATE()))") . "
@@ -4326,7 +4330,8 @@ function gorevIrisTalepEslestir(array $params, $db): array
 
         $perMap   = irisPersonelHaritasi($db);
         $durumMap = irisDurumKoduHaritasi($db);
-        $o        = irisTalepOturum($db);
+        // ana_bayi_id verilmezse panelin varsayılan hesabı (IrisTalepVarsayilan bayrağı)
+        $o        = irisTalepOturum($db, (int)($params['ana_bayi_id'] ?? 0) ?: null);
         echo "  IRIS oturumu: {$o['hesap']['ad']} ({$o['hesap']['bayiKodu']}) — rol {$o['hesap']['rol']}\n\n";
 
         $sayac = ['eslesti' => 0, 'talep_yok' => 0, 'personel_eslesmedi' => 0,
@@ -4472,6 +4477,7 @@ function gorevIrisTalepEslestir(array $params, $db): array
  * dolum ayrı bir iş değil, görevin doğal sonucudur.
  *
  * Parametreler:
+ *   ana_bayi_id  : IRIS oturumunun açılacağı ana bayi (boşsa IrisTalepVarsayilan bayrağı)
  *   adet         : Bir turda işlenecek talep (vars. 300, en fazla 1000)
  *   pencere_gun  : Başvuru tarihi talep tarihinin kaç gün öncesi/sonrası olabilir (vars. 30)
  *   personeli_ez : 1 → dolu AltBayiPersonel_ID IRIS'teki kaydedenle ezilir
@@ -4496,7 +4502,9 @@ function gorevIrisTalepRapordanEslestir(array $params, $db): array
         $personeliEz = !empty($params['personeli_ez']);
         $kuru        = !empty($params['kuru']);
 
-        $o        = irisTalepOturum($db);
+        // ana_bayi_id verilmezse panelin varsayılan hesabı (IrisTalepVarsayilan bayrağı).
+        // Kuyruk bu hesabın bayi kodundaki taleplerle sınırlıdır.
+        $o        = irisTalepOturum($db, (int)($params['ana_bayi_id'] ?? 0) ?: null);
         $bayiKodu = (string)$o['hesap']['bayiKodu'];
         echo "  IRIS oturumu: {$o['hesap']['ad']} ({$bayiKodu}) — rol {$o['hesap']['rol']}\n";
 
