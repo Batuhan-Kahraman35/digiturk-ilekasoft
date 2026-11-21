@@ -54,6 +54,37 @@ class KaraListe
         return strlen($s) === 12 && substr($s, 0, 2) === '90' ? $s : null;
     }
 
+    /**
+     * GSM önek kuralını 90XXX... biçimine getirir (x/X/* joker sayılır, atılır).
+     * 523555xxx / 0523555 / 90523555 / +90 523 555 → 90523555
+     * En az 3 hane GSM öneki (5XX) zorunlu; tam numara (12 hane) önek olarak kabul edilmez.
+     *
+     * @return string|null Geçersizse null
+     */
+    public static function normalizeGsmOnek(?string $onek): ?string
+    {
+        $s = preg_replace('/\D/', '', (string)$onek);
+        if ($s === '') return null;
+
+        if (substr($s, 0, 2) === '00')      $s = substr($s, 2);
+        if ($s[0] === '5')                  $s = '90' . $s;          // 523555
+        elseif (substr($s, 0, 2) === '05')  $s = '9' . $s;           // 0523555
+        elseif (substr($s, 0, 3) === '900') $s = '90' . substr($s, 3);
+
+        $len = strlen($s);
+        return substr($s, 0, 3) === '905' && $len >= 5 && $len < 12 ? $s : null;
+    }
+
+    /** Türe göre değeri normalize eder (gsm | gsm_onek | tc). */
+    public static function normalize(?string $ham, string $tur): ?string
+    {
+        return match ($tur) {
+            'tc'       => self::normalizeTc($ham),
+            'gsm_onek' => self::normalizeGsmOnek($ham),
+            default    => self::normalizeGsm($ham),
+        };
+    }
+
     /** TCKN'i yalnız rakama indirger. Geçersizse null. */
     public static function normalizeTc(?string $tc): ?string
     {
@@ -78,6 +109,8 @@ class KaraListe
 
     /**
      * Değer kara listede mi? Yalnız aktif (Durum=1) ve tarih aralığı içindeki kayıt döner.
+     * GSM için tam eşleşme yoksa önek kuralları (gsm_onek) da denenir; tam eşleşme önceliklidir.
+     * Dönen satırda '_eslesen' = kontrol edilen gerçek değer.
      *
      * @param string $deger Normalize edilmiş GSM veya TCKN
      * @param string $tur   gsm | tc
@@ -88,15 +121,22 @@ class KaraListe
         if ($deger === null || $deger === '') return null;
 
         try {
-            return self::db()->fetchOne("
+            $kayit = self::db()->fetchOne("
                 SELECT TOP 1 *
                 FROM dbo.KaraListe
-                WHERE KaraListe_Tur = ?
-                  AND KaraListe_Deger = ?
+                WHERE (
+                        (KaraListe_Tur = ? AND KaraListe_Deger = ?)
+                     OR (? = 'gsm' AND KaraListe_Tur = 'gsm_onek' AND ? LIKE KaraListe_Deger + '%')
+                      )
                   AND Durum = 1
                   AND (KaraListe_BaslangicTarihi IS NULL OR KaraListe_BaslangicTarihi <= GETDATE())
                   AND (KaraListe_BitisTarihi     IS NULL OR KaraListe_BitisTarihi     >= GETDATE())
-            ", [$tur, $deger]) ?: null;
+                ORDER BY CASE WHEN KaraListe_Tur = 'gsm_onek' THEN 1 ELSE 0 END,
+                         LEN(KaraListe_Deger) DESC
+            ", [$tur, $deger, $tur, $deger]) ?: null;
+
+            if ($kayit) $kayit['_eslesen'] = $deger;
+            return $kayit;
         } catch (Exception $e) {
             // Kontrol hatası akışı kesmemeli; engelli saymayız.
             error_log('KaraListe kontrol hatası: ' . $e->getMessage());
@@ -163,10 +203,13 @@ class KaraListe
         string $tur
     ): void {
         try {
+            // Önek kuralında açıklama gerçek numarayla başlar ("90XXXXXXXXXX (GSM_ONEK <önek>*)");
+            // kara-liste.php geçmişi "Deger%" ile aradığı için önek de eşleşir.
+            $onekMi   = ($kayit['KaraListe_Tur'] ?? '') === 'gsm_onek';
             $aciklama = sprintf(
                 '%s (%s) kara listede engellendi — %s',
-                $kayit['KaraListe_Deger'],
-                strtoupper($tur),
+                $onekMi ? ($kayit['_eslesen'] ?? $kayit['KaraListe_Deger']) : $kayit['KaraListe_Deger'],
+                $onekMi ? 'GSM_ONEK ' . $kayit['KaraListe_Deger'] . '*' : strtoupper($tur),
                 trim((string)($kayit['KaraListe_Aciklama'] ?? '')) !== ''
                     ? $kayit['KaraListe_Aciklama']
                     : 'açıklama yok'
@@ -179,8 +222,9 @@ class KaraListe
                 'BasvuruLog_ApiIstek'   => $detay !== null
                     ? json_encode([
                         'kara_liste_id' => $kayit['KaraListe_id'],
-                        'tur'           => $tur,
+                        'tur'           => $kayit['KaraListe_Tur'] ?? $tur,
                         'deger'         => $kayit['KaraListe_Deger'],
+                        'eslesen'       => $kayit['_eslesen'] ?? null,
                         'kaynak'        => $kayit['KaraListe_Kaynak'],
                         'detay'         => $detay,
                       ], JSON_UNESCAPED_UNICODE)
@@ -226,11 +270,12 @@ class KaraListe
         ?string $baslangic = null,
         ?string $bitis = null
     ): array {
-        $deger = $tur === 'tc' ? self::normalizeTc($ham) : self::normalizeGsm($ham);
+        $deger = self::normalize($ham, $tur);
 
         if ($deger === null) {
             return ['success' => false, 'durum' => 'gecersiz', 'id' => null,
-                    'mesaj' => ($tur === 'tc' ? 'Geçersiz TC kimlik no: ' : 'Geçersiz numara: ') . $ham];
+                    'mesaj' => ($tur === 'tc' ? 'Geçersiz TC kimlik no: '
+                              : ($tur === 'gsm_onek' ? 'Geçersiz önek: ' : 'Geçersiz numara: ')) . $ham];
         }
 
         $mevcut = self::db()->fetchOne(

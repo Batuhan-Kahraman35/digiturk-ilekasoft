@@ -141,6 +141,7 @@ function karaListeEslesmeSql(): string {
           AND (k.KaraListe_BitisTarihi     IS NULL OR k.KaraListe_BitisTarihi     >= GETDATE())
           AND (
                 (k.KaraListe_Tur = 'gsm' AND LEN($rakam) >= 10 AND k.KaraListe_Deger = '90' + RIGHT($rakam, 10))
+             OR (k.KaraListe_Tur = 'gsm_onek' AND LEN($rakam) >= 10 AND '90' + RIGHT($rakam, 10) LIKE k.KaraListe_Deger + '%')
              OR (k.KaraListe_Tur = 'tc'  AND t.TCKimlikNo IS NOT NULL AND k.KaraListe_Deger = t.TCKimlikNo)
           )
     )";
@@ -1136,9 +1137,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                               AND (k.KaraListe_BitisTarihi     IS NULL OR k.KaraListe_BitisTarihi     >= GETDATE())
                               AND (
                                     (k.KaraListe_Tur = 'gsm' AND LEN(tr.TelRakam) >= 10 AND k.KaraListe_Deger = '90' + RIGHT(tr.TelRakam, 10))
+                                 OR (k.KaraListe_Tur = 'gsm_onek' AND LEN(tr.TelRakam) >= 10 AND '90' + RIGHT(tr.TelRakam, 10) LIKE k.KaraListe_Deger + '%')
                                  OR (k.KaraListe_Tur = 'tc'  AND t.TCKimlikNo IS NOT NULL AND k.KaraListe_Deger = t.TCKimlikNo)
                               )
-                            ORDER BY CASE k.KaraListe_Tur WHEN 'gsm' THEN 0 ELSE 1 END
+                            ORDER BY CASE k.KaraListe_Tur WHEN 'gsm' THEN 0 WHEN 'gsm_onek' THEN 1 ELSE 2 END
                         ) kl
                         ORDER BY $orderBy $orderDir, t.Basvurular_id DESC
                     ", $paramsFilt);
@@ -3051,7 +3053,7 @@ $dagitLeadFormlari = $db->fetchAll("
         const mBadge = mAdet > 1
             ? ` <span class="badge bg-danger" title="Bu telefon numarası ${mAdet} başvuruda mükerrer"><i class="bi bi-exclamation-triangle-fill"></i> ${mAdet}x</span>`
             : '';
-        const kBadge = row.KaraListeTur === 'gsm' ? karaListeBadge(row) : '';
+        const kBadge = (row.KaraListeTur === 'gsm' || row.KaraListeTur === 'gsm_onek') ? karaListeBadge(row) : '';
         return `<span class="mono tel-kopya" data-tel="${escapeHtml(kopya)}" title="Kopyalamak için tıkla" style="cursor:pointer">${escapeHtml(goster)}</span>${mBadge}${kBadge}`;
     }
 

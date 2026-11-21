@@ -39,8 +39,9 @@ $siteTitle    = $siteAyarlari['site_ayarlari_site_title'] ?? 'Örnek Yazılım P
 
 /** Kayıt türleri (tablo şemasının parçası — tek yerde tanımlı) */
 $KARALISTE_TURLERI = [
-    'gsm' => 'Telefon (GSM)',
-    'tc'  => 'TC Kimlik No',
+    'gsm'      => 'Telefon (GSM)',
+    'gsm_onek' => 'GSM Önek (ile başlayan)',
+    'tc'       => 'TC Kimlik No',
 ];
 
 // ─── AJAX ─────────────────────────────────────────────────────────────────────
@@ -106,10 +107,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     4 => 't.KaraListe_BitisTarihi',
                     5 => 't.KaraListe_EngellemeSayisi',
                     6 => 't.Durum',
-                    7 => 't.OlusturmaTarihi',
+                    7 => 't.KaraListe_SonEngellemeTarihi',
                 ];
                 $orderIdx = (int)($_POST['order'][0]['column'] ?? 7);
-                $orderBy  = $orderMap[$orderIdx] ?? 't.OlusturmaTarihi';
+                $orderBy  = $orderMap[$orderIdx] ?? 't.KaraListe_SonEngellemeTarihi';
                 $orderDir = strtolower($_POST['order'][0]['dir'] ?? 'desc') === 'asc' ? 'ASC' : 'DESC';
 
                 $data = [];
@@ -207,12 +208,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
 
                 $ham   = trim((string)($_POST['deger'] ?? ''));
-                $deger = $tur === 'tc' ? KaraListe::normalizeTc($ham) : KaraListe::normalizeGsm($ham);
+                $deger = KaraListe::normalize($ham, $tur);
 
                 if ($deger === null) {
-                    echo json_encode(['success' => false, 'message' => $tur === 'tc'
-                        ? 'Geçersiz TC kimlik no (11 hane olmalı)'
-                        : 'Geçersiz numara. Örnek: 5321234567 veya 905321234567']);
+                    echo json_encode(['success' => false, 'message' => match ($tur) {
+                        'tc'       => 'Geçersiz TC kimlik no (11 hane olmalı)',
+                        'gsm_onek' => 'Geçersiz önek. 5 ile başlayan, tam numaradan kısa olmalı. Örnek: 523555 veya 523555xxx',
+                        default    => 'Geçersiz numara. Örnek: 5321234567 veya 905321234567',
+                    }]);
                     break;
                 }
 
@@ -542,7 +545,7 @@ $kaynaklar = $db->fetchAll("
                                     <th>Bitiş</th>
                                     <th>Engelleme</th>
                                     <th>Durum</th>
-                                    <th>Eklenme</th>
+                                    <th>Son Deneme</th>
                                     <th style="width:120px">İşlemler</th>
                                 </tr>
                             </thead>
@@ -582,7 +585,7 @@ $kaynaklar = $db->fetchAll("
                             <label class="form-label">Değer <span class="text-danger">*</span></label>
                             <input type="text" class="form-control font-monospace" id="rec_deger" name="deger" required
                                    placeholder="5321234567 / 905321234567">
-                            <div class="form-text">Numara otomatik olarak 90XXXXXXXXXX biçimine çevrilir.</div>
+                            <div class="form-text" id="rec_deger_ipucu">Numara otomatik olarak 90XXXXXXXXXX biçimine çevrilir.</div>
                         </div>
                         <div class="col-md-12">
                             <label class="form-label">Açıklama</label>
@@ -769,7 +772,7 @@ $kaynaklar = $db->fetchAll("
             },
             columnDefs: [{ orderable: false, targets: [8] }],
             columns: [
-                { data: 'KaraListe_Deger', render: d => `<span class="deger-badge">${escapeHtml(d)}</span>` },
+                { data: 'KaraListe_Deger', render: (d, t, row) => `<span class="deger-badge">${escapeHtml(d)}${row.KaraListe_Tur === 'gsm_onek' ? '<span class="text-muted">*</span>' : ''}</span>` },
                 { data: 'KaraListe_Tur',   render: d => `<span class="tur-badge">${escapeHtml(TUR_ADLARI[d] || d)}</span>` },
                 { data: 'KaraListe_Aciklama', render: d => escapeHtml(d || '-') },
                 { data: 'KaraListe_Kaynak',   render: d => escapeHtml(d || '-') },
@@ -788,8 +791,10 @@ $kaynaklar = $db->fetchAll("
                         : '';
                     return `<span class="durum-badge durum-${d}"${tik}>${etiket}</span>`;
                 }},
-                { data: 'OlusturmaTarihi', render: function (d, t, row) {
-                    return escapeHtml(d || '-') + (row.EkleyenAd ? `<br><small class="text-muted">${escapeHtml(row.EkleyenAd)}</small>` : '');
+                { data: 'SonEngellemeTarihi', render: function (d, t, row) {
+                    const ekleme = 'Eklenme: ' + (row.OlusturmaTarihi || '-') + (row.EkleyenAd ? ' — ' + row.EkleyenAd : '');
+                    if (!d) return `<span class="text-muted" title="${escapeHtml(ekleme)}">Deneme yok</span>`;
+                    return `<a href="#" onclick="gecmisGoster(${row.KaraListe_id});return false;" title="${escapeHtml(ekleme)}">${escapeHtml(d)}</a>`;
                 }},
                 { data: 'KaraListe_id', render: function (d) {
                     let h = `<button class="btn btn-sm btn-secondary me-1" onclick="gecmisGoster(${d})" title="Engelleme geçmişi"><i class="bi bi-clock-history"></i></button>`;
@@ -831,9 +836,16 @@ $kaynaklar = $db->fetchAll("
         $('#kayitForm').on('submit', function (e) { e.preventDefault(); saveRecord(); });
         $('#topluForm').on('submit', function (e) { e.preventDefault(); topluEkle(); });
 
-        // Tür değişince placeholder güncelle
+        // Tür değişince placeholder / açıklama güncelle
+        const TUR_IPUCU = {
+            gsm:      ['5321234567 / 905321234567', 'Numara otomatik olarak 90XXXXXXXXXX biçimine çevrilir.'],
+            gsm_onek: ['523555 / 523555xxx', 'Bu önekle başlayan tüm numaralar engellenir. x/* joker yazılabilir, 90XXX... biçimine çevrilir.'],
+            tc:       ['12345678901', '11 haneli TC kimlik no.']
+        };
         $('#rec_tur').on('change', function () {
-            $('#rec_deger').attr('placeholder', $(this).val() === 'tc' ? '12345678901' : '5321234567 / 905321234567');
+            const ip = TUR_IPUCU[$(this).val()] || TUR_IPUCU.gsm;
+            $('#rec_deger').attr('placeholder', ip[0]);
+            $('#rec_deger_ipucu').text(ip[1]);
         });
 
         document.getElementById('kayitModal').addEventListener('hidden.bs.modal', resetForm);
