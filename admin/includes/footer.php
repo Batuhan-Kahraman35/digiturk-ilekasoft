@@ -197,6 +197,25 @@ $_faviconUrl = ($siteAyarlari['site_ayarlari_favicon_url'] ?? '') ?: '/favicon.i
 })();
 </script>
 <script src="/admin/assets/js/pwa.js" defer></script>
+<script>
+// Ortak DataTables ayarları. footer.php jQuery'den önce yüklendiği için DOMContentLoaded beklenir;
+// bu dinleyici jQuery'ninkinden önce kaydolduğundan sayfaların $(document).ready init'lerinden ÖNCE çalışır.
+document.addEventListener('DOMContentLoaded', function () {
+    var $ = window.jQuery;
+    if (!$ || !$.fn || !$.fn.dataTable) return;
+
+    // scrollX: çok kolonlu tablolar kartın dışına taşmasın (istenmeyen sayfada init'e `scrollX: false`)
+    // autoWidth: false → init'te kolonlara sabit piksel yazılmaz, tablo sayfa genişliğine göre daralır/genişler
+    $.extend(true, $.fn.dataTable.defaults, { scrollX: true, autoWidth: false });
+
+    // scrollX'te başlık/gövde ayrı tablolardır; konteyner genişliği değişince yeniden hizala
+    var hizala = function () { $.fn.dataTable.tables({ visible: true, api: true }).columns.adjust(); };
+    $(document).on('click', '[data-lte-toggle="sidebar"]', function () { setTimeout(hizala, 350); });
+    $(document).on('shown.bs.modal shown.bs.tab shown.bs.collapse', hizala);
+    var zamanlayici;
+    $(window).on('resize', function () { clearTimeout(zamanlayici); zamanlayici = setTimeout(hizala, 150); });
+});
+</script>
 <?php
 // --- Oturum Sure Takibi ---
 // Sure bitimine 30 sn kala uyari (uzatma / cikis), ayrica oturumu bitmis

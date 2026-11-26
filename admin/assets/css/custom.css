@@ -55,6 +55,12 @@
     border-radius: 0.25rem;
 }
 
+/* scrollX'te DataTables tabloya init anındaki piksel genişliği yazar; konteynere göre akışkan kalsın.
+   Tablo içeriğin en dar hâlinden daha dar olamaz; o noktadan sonra yatay kaydırma devreye girer. */
+table.dataTable {
+    width: 100% !important;
+}
+
 /* ======================================
    Info Box Özelleştirmeleri
    ====================================== */
