@@ -30,182 +30,7 @@ if (!$permissions['has_access']) {
 $siteAyarlari = $db->fetchOne("SELECT TOP 1 site_ayarlari_site_title FROM dbo.tanim_site_ayarlari ORDER BY site_ayarlari_id DESC");
 $siteTitle    = $siteAyarlari['site_ayarlari_site_title'] ?? 'Örnek Yazılım Portal';
 
-// ISP senkronizasyon sabitleri
-// Fiyat ve hız varyantları BBK adresine bağlı geldiği için sabit referans adresler kullanılır.
-// Fiber adres 35–1000 Mbps, VDSL adres 16–50 Mbps döndürür; ikisi birleşince katalog tamamlanır.
-// (100 Mbps XDSL varyantı bu iki adreste bulunmadığı için eksik kalır.)
-const ISP_REFERANS_BBK  = ['99944924', '9977316'];
-const ISP_TUR_ID        = 3;
-const ISP_ATLA_KODLAR   = ['YWV'];                      // STATIK IP — kampanya değil, ek hizmet
-const ISP_KATEGORI_MAP  = [25 => 'ISP+NEO', 26 => 'ISP+UYDU'];
-
-// Metinden PaketAdi türetir (NEO, UYDU ve ISP için ortak)
-function paketAdiTuret($metin) {
-    $paketAdiMap = [
-        'Beşiktaş'    => 'Beşiktaş Taraftar Paketi',
-        'Fenerbahçe'  => 'Fenerbahçe Taraftar Paketi',
-        'Galatasaray' => 'Galatasaray Taraftar Paketi',
-        'Trabzonspor' => 'Trabzonspor Taraftar Paketi',
-        'Dolu'        => 'Yıldız Dolu Paketi',
-        'Eğlence'     => 'Eğlence ve Avrupanın Yıldızı Paketi',
-        'Sporun'      => 'Sporun Yıldızı Paketi',
-    ];
-    foreach ($paketAdiMap as $keyword => $paketAdi) {
-        if (strpos((string)$metin, $keyword) !== false) return $paketAdi;
-    }
-    return null;
-}
-
-// offerToCode'dan hız ve altyapı türetir: PTS_YLN_VDSL_35E_SRV -> "35 Mbps VDSL"
-// API'nin description alanı 20 karakterde kesildiği için hız kodun kendisinden okunur.
-function ispHizAciklama($offerToCode) {
-    if (!preg_match('/(FIBER|VDSL)_?(\d+)(G)?/i', (string)$offerToCode, $m)) return null;
-    $hiz = (int)$m[2];
-    if (!empty($m[3])) $hiz *= 1000;                    // 1G -> 1000 Mbps
-    return $hiz . ' Mbps ' . (strtoupper($m[1]) === 'FIBER' ? 'Fiber' : 'VDSL');
-}
-
-// API senkronizasyon yardımcı fonksiyonları
-function processEntity($db, $entityData, $userId, $tur, &$inserted, &$updated) {
-    $kategoriAdi  = null;
-    $entityResult = $entityData['entityResult'] ?? null;
-
-    if ($entityResult && !empty($entityResult['entityJsonTypeList'])) {
-        $jsonType    = json_decode($entityResult['entityJsonTypeList'], true);
-        $kategoriAdi = $jsonType['GORUNEN_ISIM'] ?? null;
-    }
-
-    foreach (($entityData['offerResultList'] ?? []) as $offer) {
-        upsertKampanya($db, $offer, $kategoriAdi, $userId, $tur, $inserted, $updated);
-    }
-
-    foreach (($entityData['subProductCatalogList'] ?? []) as $sub) {
-        processEntity($db, $sub, $userId, $tur, $inserted, $updated);
-    }
-}
-
-function upsertKampanya($db, $offer, $kategoriAdi, $userId, $tur, &$inserted, &$updated) {
-    $offerFromCode = $offer['offerFromCode'] ?? null;
-    $offerToCode   = $offer['offerToCode']   ?? null;
-    if (!$offerFromCode || !$offerToCode) return;
-
-    $existing = $db->fetchOne("
-        SELECT APIKampanyalar_Id FROM APIKampanyalar
-        WHERE APIKampanyalar_OfferFromCode = ?
-          AND APIKampanyalar_OfferToCode   = ?
-          AND ISNULL(APIKampanyalar_KategoriAdi, '') = ISNULL(?, '')
-    ", [$offerFromCode, $offerToCode, $kategoriAdi]);
-
-    // Açıklama'dan PaketAdi türet
-    $derivedPaketAdi = paketAdiTuret($offer['description'] ?? '');
-
-    // KategoriAdi'ndan OdemeTuru türet
-    $odemeTuru = null;
-    if ($kategoriAdi) {
-        if (strpos($kategoriAdi, 'KREDI')   !== false) $odemeTuru = 1;
-        elseif (strpos($kategoriAdi, 'FATURALI') !== false) $odemeTuru = 2;
-    }
-
-    // KategoriAdi'ndan Tur türet (endpoint'ten gelen $tur'u override eder)
-    if ($kategoriAdi) {
-        if (strpos($kategoriAdi, 'NEO')  !== false) $tur = 1;
-        elseif (strpos($kategoriAdi, 'UYDU') !== false) $tur = 2;
-    }
-
-    $apiData = [
-        'APIKampanyalar_Tur'           => $tur,
-        'APIKampanyalar_OdemeTuru'     => $odemeTuru,
-        'APIKampanyalar_KategoriAdi'   => $kategoriAdi,
-        'APIKampanyalar_OfferFromCode' => $offerFromCode,
-        'APIKampanyalar_OfferFromId'   => isset($offer['offerFromId'])  ? (int)$offer['offerFromId']   : null,
-        'APIKampanyalar_OfferToCode'   => $offerToCode,
-        'APIKampanyalar_OfferToId'     => isset($offer['offerToId'])    ? (int)$offer['offerToId']     : null,
-        'APIKampanyalar_Ad'            => $offer['name']                ?? null,
-        'APIKampanyalar_Aciklama'      => $offer['description']         ?? null,
-        'APIKampanyalar_Fiyat'         => isset($offer['priceAmount'])  ? (float)$offer['priceAmount'] : null,
-        'APIKampanyalar_ParaBirimi'    => $offer['currencyTypeCd']      ?? 'TL',
-        'APIKampanyalar_FaturaDonemi'  => $offer['billFrequencyTypeCd'] ?? null,
-        'GuncelleyenKullanici'         => $userId,
-        'GuncellemeTarihi'             => date('Y-m-d H:i:s'),
-    ];
-
-    if ($derivedPaketAdi !== null) {
-        $apiData['APIKampanyalar_PaketAdi'] = $derivedPaketAdi;
-    }
-
-    if ($existing) {
-        $db->update('APIKampanyalar', $apiData, ['APIKampanyalar_Id' => $existing['APIKampanyalar_Id']]);
-        $updated++;
-    } else {
-        $apiData['OlusturanKullanici'] = $userId;
-        $apiData['OlusturmaTarihi']    = date('Y-m-d H:i:s');
-        $apiData['Durum']              = 0;
-        $db->insert('APIKampanyalar', $apiData);
-        $inserted++;
-    }
-}
-
-// ISP kampanyası kaydeder (endpoint 25/26)
-// NEO/UYDU'dan farkları: fiyat alanı 'price' (priceAmount yok), kampanya kodu offerFromCode'da
-// (name null gelir), TV paketi ayrı bir listede (bundleOfferResultList) ve fiyatı ana fiyata eklenir.
-function upsertIspKampanya($db, $offer, $kategoriAdi, $userId, &$inserted, &$updated) {
-    $offerFromCode = $offer['offerFromCode'] ?? null;
-    $offerToCode   = $offer['offerToCode']   ?? null;
-    if (!$offerFromCode || !$offerToCode) return;
-    if (in_array($offerFromCode, ISP_ATLA_KODLAR, true)) return;
-
-    // TV paketi olmayan satır (ör. tek başına ek hizmet) kampanya sayılmaz
-    $bundleList = $offer['bundleOfferResultList'] ?? [];
-    if (!$bundleList) return;
-
-    // Fiyat = internet + TV paketi. STATIK IP ve modem opsiyonel olduğu için toplama girmez.
-    $fiyat = (float)($offer['price'] ?? 0);
-    foreach ($bundleList as $bundle) {
-        $fiyat += (float)($bundle['price'] ?? 0);
-    }
-
-    $ilkBundle = $bundleList[0];
-
-    $existing = $db->fetchOne("
-        SELECT APIKampanyalar_Id FROM APIKampanyalar
-        WHERE APIKampanyalar_OfferFromCode = ?
-          AND APIKampanyalar_OfferToCode   = ?
-          AND ISNULL(APIKampanyalar_KategoriAdi, '') = ISNULL(?, '')
-    ", [$offerFromCode, $offerToCode, $kategoriAdi]);
-
-    $apiData = [
-        'APIKampanyalar_Tur'           => ISP_TUR_ID,
-        'APIKampanyalar_KategoriAdi'   => $kategoriAdi,
-        'APIKampanyalar_OfferFromCode' => $offerFromCode,
-        'APIKampanyalar_OfferFromId'   => isset($offer['offerFromId']) ? (int)$offer['offerFromId'] : null,
-        'APIKampanyalar_OfferToCode'   => $offerToCode,
-        'APIKampanyalar_OfferToId'     => isset($offer['offerToId'])   ? (int)$offer['offerToId']   : null,
-        'APIKampanyalar_Ad'            => $offerFromCode,
-        'APIKampanyalar_Aciklama'      => ispHizAciklama($offerToCode),
-        'APIKampanyalar_Fiyat'         => $fiyat,
-        'APIKampanyalar_ParaBirimi'    => $ilkBundle['currencyTypeCd'] ?? $offer['currencyTypeCd'] ?? 'TL',
-        'APIKampanyalar_FaturaDonemi'  => $offer['billFrequencyTypeCd'] ?? $ilkBundle['billFrequencyTypeCd'] ?? null,
-        'GuncelleyenKullanici'         => $userId,
-        'GuncellemeTarihi'             => date('Y-m-d H:i:s'),
-    ];
-
-    // PaketAdi bundle adından türetilir; ISP'de ana satırın description'ı hız bilgisi taşır
-    $derivedPaketAdi = paketAdiTuret($ilkBundle['name'] ?? $ilkBundle['description'] ?? '');
-    if ($derivedPaketAdi !== null) {
-        $apiData['APIKampanyalar_PaketAdi'] = $derivedPaketAdi;
-    }
-
-    if ($existing) {
-        $db->update('APIKampanyalar', $apiData, ['APIKampanyalar_Id' => $existing['APIKampanyalar_Id']]);
-        $updated++;
-    } else {
-        $apiData['OlusturanKullanici'] = $userId;
-        $apiData['OlusturmaTarihi']    = date('Y-m-d H:i:s');
-        $apiData['Durum']              = 0;
-        $db->insert('APIKampanyalar', $apiData);
-        $inserted++;
-    }
-}
+require_once __DIR__ . '/../includes/ApiKampanyaSenkron.php';
 
 // Bir kodun tüm kayıtlarında bayrak: 1 = hepsinde var, 0 = hiçbirinde yok, null = karışık
 function topluBayrakDurum($varOlan, $toplam) {
@@ -664,137 +489,42 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     break;
                 }
 
-                $personel = $db->fetchOne("
-                    SELECT DigiturkAltBayiPersonel_Token
-                    FROM DigiturkAltBayiPersonel
-                    WHERE DigiturkAltBayiPersonel_Id = ?
-                ", [(int)siteAyar('api_personel_id', 0)]);
-
-                if (!$personel || empty($personel['DigiturkAltBayiPersonel_Token'])) {
-                    echo json_encode(['success' => false, 'message' => 'Aktif token bulunamadı! Lütfen token yenileyin.']);
+                // Buton, IRIS İşlemleri görevinin islem=kampanya zamanlayıcısını elle tetikler
+                // (cron-yonetimi "Çalıştır" ile aynı akış: log + SonCalisma). İş mantığı
+                // includes/ApiKampanyaSenkron.php içinde; her sabah 09:00 aynı zamanlayıcı çalışır.
+                require_once __DIR__ . '/../../cron/tasks.php';
+                $zam = $db->fetchOne("
+                    SELECT TOP 1 z.CronZamanlamalar_Id, z.CronZamanlamalar_SabitParametreler,
+                           g.CronGorevler_Id, g.CronGorevler_GorevKodu
+                    FROM CronZamanlamalar z
+                    INNER JOIN CronGorevler g ON g.CronGorevler_Id = z.CronZamanlamalar_GorevId
+                    WHERE g.CronGorevler_GorevKodu = 'iris_islemler' AND g.Durum = 1
+                      AND JSON_VALUE(z.CronZamanlamalar_SabitParametreler, '$.islem') = 'kampanya'
+                    ORDER BY z.Durum DESC, z.CronZamanlamalar_Id
+                ");
+                if (!$zam) {
+                    echo json_encode(['success' => false, 'message' => "Cron Yönetimi'nde 'IRIS İşlemleri' altında 'API Kampanya Güncelleme' (islem=kampanya) zamanlayıcısı tanımlı değil."]);
                     break;
                 }
 
-                $token     = $personel['DigiturkAltBayiPersonel_Token'];
-                $endpoints = $db->fetchAll("
-                    SELECT APIEndpointler_Id, APIEndpointler_Endpoint, APIEndpointler_Aciklama
-                    FROM APIEndpointler
-                    WHERE APIEndpointler_Id IN (11, 12) AND Durum = 1
-                    ORDER BY APIEndpointler_Id
-                ");
+                $zamId  = (int)$zam['CronZamanlamalar_Id'];
+                $params = dinamikParamCoz(json_decode($zam['CronZamanlamalar_SabitParametreler'] ?? '{}', true) ?? []);
+                $params['_kullanici_id'] = (int)$user['kullanici_id'];
+                $db->update('CronZamanlamalar', ['CronZamanlamalar_SonCalisma' => date('Y-m-d H:i:s')], ['CronZamanlamalar_Id' => $zamId]);
 
-                $totalInserted = 0;
-                $totalUpdated  = 0;
-                $errors        = [];
-
-                foreach ($endpoints as $ep) {
-                    $ch = curl_init($ep['APIEndpointler_Endpoint']);
-                    curl_setopt_array($ch, [
-                        CURLOPT_RETURNTRANSFER => true,
-                        CURLOPT_POST           => true,
-                        CURLOPT_POSTFIELDS     => '{}',
-                        CURLOPT_HTTPHEADER     => [
-                            'Content-Type: application/json',
-                            'Token: ' . $token,
-                        ],
-                        CURLOPT_SSL_VERIFYPEER => false,
-                        CURLOPT_TIMEOUT        => 30,
-                    ]);
-
-                    $response = curl_exec($ch);
-                    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-                    $curlErr  = curl_error($ch);
-                    unset($ch);
-
-                    if ($curlErr || $response === false) {
-                        $errors[] = "{$ep['APIEndpointler_Aciklama']}: Bağlantı hatası ($curlErr)";
-                        continue;
-                    }
-                    if ($httpCode !== 200) {
-                        $errors[] = "{$ep['APIEndpointler_Aciklama']}: HTTP $httpCode";
-                        continue;
-                    }
-
-                    $data = json_decode($response, true);
-                    if (!$data || ($data['responseCode'] ?? -1) !== 0) {
-                        $errors[] = "{$ep['APIEndpointler_Aciklama']}: API hata kodu " . ($data['responseCode'] ?? '?');
-                        continue;
-                    }
-
-                    $turMap = [11 => 1, 12 => 2];
-                    $tur    = $turMap[$ep['APIEndpointler_Id']] ?? null;
-                    processEntity($db, $data['data'], $user['kullanici_id'], $tur, $totalInserted, $totalUpdated);
+                $logId    = cronLogOlustur($db, (int)$zam['CronGorevler_Id'], $zamId, $params, 0, $user['kullanici_id']);
+                $basZaman = microtime(true);
+                try {
+                    $sonuc = gorevCalistir($zam['CronGorevler_GorevKodu'], $params, $db);
+                } catch (Throwable $e) {
+                    $sonuc = ['durum' => 2, 'sonuc' => 'Hata: ' . $e->getMessage(), 'cikti' => ''];
                 }
-
-                // ISP kampanyaları (endpoint 25/26) — NEO/UYDU'dan ayrı akış.
-                // Bu uçlar boş gövde kabul etmez; her referans BBK için ayrı çağrı yapılır.
-                $ispEndpoints = $db->fetchAll("
-                    SELECT APIEndpointler_Id, APIEndpointler_Endpoint, APIEndpointler_Aciklama
-                    FROM APIEndpointler
-                    WHERE APIEndpointler_Id IN (25, 26) AND Durum = 1
-                    ORDER BY APIEndpointler_Id
-                ");
-
-                foreach ($ispEndpoints as $ep) {
-                    $epId        = (int)$ep['APIEndpointler_Id'];
-                    $kategoriAdi = ISP_KATEGORI_MAP[$epId] ?? null;
-                    if (!$kategoriAdi) continue;
-
-                    foreach (ISP_REFERANS_BBK as $bbk) {
-                        $ch = curl_init($ep['APIEndpointler_Endpoint']);
-                        curl_setopt_array($ch, [
-                            CURLOPT_RETURNTRANSFER => true,
-                            CURLOPT_POST           => true,
-                            CURLOPT_POSTFIELDS     => json_encode(['bbkId' => (int)$bbk, 'adslNo' => null]),
-                            CURLOPT_HTTPHEADER     => [
-                                'Content-Type: application/json',
-                                'Token: ' . $token,
-                            ],
-                            CURLOPT_SSL_VERIFYPEER => false,
-                            CURLOPT_TIMEOUT        => 60,
-                        ]);
-
-                        $response = curl_exec($ch);
-                        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-                        $curlErr  = curl_error($ch);
-                        unset($ch);
-
-                        if ($curlErr || $response === false) {
-                            $errors[] = "{$ep['APIEndpointler_Aciklama']} (BBK $bbk): Bağlantı hatası ($curlErr)";
-                            continue;
-                        }
-                        if ($httpCode !== 200) {
-                            $errors[] = "{$ep['APIEndpointler_Aciklama']} (BBK $bbk): HTTP $httpCode";
-                            continue;
-                        }
-
-                        $data = json_decode($response, true);
-                        if (!$data || ($data['responseCode'] ?? -1) !== 0) {
-                            // responseCode 2 = "altyapı mevcut değildir" — hata değil, o adreste ISP yok
-                            if (($data['responseCode'] ?? -1) !== 2) {
-                                $errors[] = "{$ep['APIEndpointler_Aciklama']} (BBK $bbk): API hata kodu "
-                                          . ($data['responseCode'] ?? '?');
-                            }
-                            continue;
-                        }
-
-                        foreach (($data['data']['offerResultList'] ?? []) as $offer) {
-                            upsertIspKampanya($db, $offer, $kategoriAdi, $user['kullanici_id'],
-                                              $totalInserted, $totalUpdated);
-                        }
-                    }
-                }
-
-                $message = "$totalInserted kayıt eklendi, $totalUpdated kayıt güncellendi.";
-                if ($errors) {
-                    $message .= ' | Hatalar: ' . implode(' | ', $errors);
-                }
+                cronLogBitir($db, $logId, $sonuc['durum'], $sonuc['sonuc'], $basZaman);
 
                 echo json_encode([
-                    'success'  => empty($errors) || ($totalInserted + $totalUpdated > 0),
-                    'message'  => $message,
-                    'inserted' => $totalInserted,
-                    'updated'  => $totalUpdated,
+                    'success' => (int)$sonuc['durum'] === 1,
+                    'message' => $sonuc['sonuc'],
+                    'log_id'  => $logId,
                 ]);
                 break;
 

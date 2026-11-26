@@ -5180,8 +5180,35 @@ function gorevIrisIslemler(array $params, $db): array
         'rapor'    => gorevIrisRapor($params, $db),
         'surec'    => gorevBasvuruSurecGuncelle($params, $db),
         'eslestir' => gorevIrisTalepEslestir($params, $db),
-        default    => ['durum' => 2, 'sonuc' => "Geçersiz IRIS işlemi: '{$islem}' (token | rapor | surec | eslestir)", 'cikti' => ''],
+        'kampanya' => gorevApiKampanyaGuncelle($params, $db),
+        default    => ['durum' => 2, 'sonuc' => "Geçersiz IRIS işlemi: '{$islem}' (token | rapor | surec | eslestir | kampanya)", 'cikti' => ''],
     };
+}
+
+/**
+ * API kampanya güncellemesi (api-kampanyalar.php "API'den Güncelle" ile aynı iş).
+ * ccapi NEO/UYDU/ISP listesi → APIKampanyalar (listede olan aktif, olmayan pasif),
+ * IRIS Kampanya Bilgileri → KOI / Süper KOI bayrağı. Mantık: admin/includes/ApiKampanyaSenkron.php
+ * Buton bu görevin islem=kampanya zamanlayıcısını tetikler; çalışma cron loguna düşer.
+ */
+function gorevApiKampanyaGuncelle(array $params, $db): array
+{
+    require_once __DIR__ . '/../admin/includes/ApiKampanyaSenkron.php';
+    @set_time_limit(600);
+    $kullaniciId = (int)($params['_kullanici_id'] ?? 1); // butondan tetiklenirse basan kullanıcı, cron'da sistem (1)
+    $r = apiKampanyaSenkron($db, $kullaniciId);
+
+    $cikti = implode(PHP_EOL, array_filter([
+        'Eklenen: '   . (int)($r['inserted'] ?? 0),
+        'Güncellenen: ' . (int)($r['updated'] ?? 0),
+        isset($r['tvPasif'])  ? 'Pasife alınan NEO/Uydu: ' . (int)$r['tvPasif'] : null,
+        isset($r['pasif'])    ? 'Pasife alınan ISP: '      . (int)$r['pasif']   : null,
+        isset($r['koi'])      ? 'KOI işaretlenen: '        . (int)$r['koi']     : null,
+        isset($r['superkoi']) ? 'Süper KOI işaretlenen: '  . (int)$r['superkoi'] : null,
+    ])) . PHP_EOL;
+
+    // durum: 1 başarılı, 2 hata. Kısmi hatada (bazı uçlar düştü ama kayıt işlendi) mesajda "Hatalar:" yer alır.
+    return ['durum' => !empty($r['success']) ? 1 : 2, 'sonuc' => (string)($r['message'] ?? ''), 'cikti' => $cikti];
 }
 
 /**
