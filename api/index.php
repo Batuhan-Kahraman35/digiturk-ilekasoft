@@ -13,6 +13,7 @@ require_once __DIR__ . '/../admin/includes/BasvuruLogHelper.php';
 require_once __DIR__ . '/../admin/includes/EntegrasyonHelper.php';
 require_once __DIR__ . '/../admin/includes/AdresYanitHelper.php';
 require_once __DIR__ . '/../admin/includes/KaraListeHelper.php';
+require_once __DIR__ . '/../admin/includes/DigiturkIspSiparis.php';
 
 header('Content-Type: application/json; charset=utf-8');
 
@@ -417,8 +418,10 @@ function handleIspCampaignList($db, string $kategoriAdi, int $bundleTur, array $
                                string $route, string $method, string $rawBody): void
 {
     // Adres verilmişse canlıya devret (DB kataloğu adresten bağımsızdır)
+    // ISP listesi Digiturk'te uzun sürebiliyor (test ortamında ~116 sn ölçüldü).
     if (isset($input['bbkId']) && (int)$input['bbkId'] > 0) {
-        handleProxy($db, $route, $method, $rawBody);
+        @set_time_limit(300);
+        handleProxy($db, $route, $method, $rawBody, false, ISP_CCAPI_TIMEOUT);
         return;
     }
 
@@ -700,6 +703,12 @@ function handleCreateOrder($db, int $tur, string $rawBody): void
     // bbkAddressCode boş/null/0 ise: 130109 - 111069460 aralığında rastgele üret.
     // Çağıran taraf dolu gönderdiyse değere dokunulmaz (gerçek adres kodu olabilir).
     $bbkOtomatik = apiBosMu($in['bbkAddressCode'] ?? null);
+    // İnternetli paketlerde (tür 3/4) kampanya, fiyat ve altyapı adrese bağlıdır;
+    // rastgele kod üretilmez, gerçek BBK adres kodu zorunludur.
+    if ($bbkOtomatik && $tur >= 3) {
+        jsonOut(['data' => null, 'responseCode' => 1,
+                 'responseMessage' => 'İnternetli siparişte bbkAddressCode (gerçek BBK adres kodu) zorunludur.'], 400);
+    }
     if ($bbkOtomatik) {
         $in['bbkAddressCode'] = apiBbkUret();
     }
@@ -748,6 +757,19 @@ function handleCreateOrder($db, int $tur, string $rawBody): void
         }
     }
 
+    // İnternetli paket ön hazırlığı: aynı token ile kampanya sorgusu, hediye
+    // kalemi, varsayılan yönlendirme. Hata varsa Digiturk'e sipariş gitmez.
+    $ispNot = [];
+    if ($tur >= 3) {
+        @set_time_limit(600);
+        try {
+            $ispNot = ispSiparisHazirla($db, $tur, $in, $token);
+        } catch (IspSiparisHatasi $e) {
+            jsonOut(['data' => $e->veri, 'responseCode' => $e->responseCode,
+                     'responseMessage' => $e->getMessage()], $e->http);
+        }
+    }
+
     // Yeniden deneme kuralı: yalnız CreateNeo'da ve bbkAddressCode'u BİZ ürettiysek.
     // Digiturk üretilen kodu bazen geçersiz ("GeoLocationId 0", "Value cannot be null")
     // bazen de dolu adres ("aktif Uydu başvurusu bulunmaktadır") olarak reddediyor;
@@ -765,7 +787,7 @@ function handleCreateOrder($db, int $tur, string $rawBody): void
         $ch = curl_init($ep['APIEndpointler_Endpoint']);
         curl_setopt_array($ch, [
             CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_TIMEOUT        => 60,
+            CURLOPT_TIMEOUT        => $tur >= 3 ? ISP_CCAPI_TIMEOUT : 60,
             CURLOPT_POST           => true,
             CURLOPT_POSTFIELDS     => $gonderBody,
             CURLOPT_HTTPHEADER     => ['Content-Type: application/json', 'Accept: application/json', 'Token: ' . $token],
@@ -825,10 +847,27 @@ function handleCreateOrder($db, int $tur, string $rawBody): void
     $kampanyaTur  = [1 => 1, 2 => 2, 3 => 1, 4 => 2];
 
     $kampanyaId = null;
+    // Tür 3/4: önce ISP kaydı (APIKampanyalar Tur=3) aranır — internet hızı + kategori,
+    // aynı hız iki TV paketiyle satıldığı için PaketAdi TV kaleminin offerTo'sundan çözülür.
+    $ispIt = $in['ispCampaignItem'] ?? null;
+    $tvIt  = $kampanyaAlan[$tur] !== null ? ($in[$kampanyaAlan[$tur]] ?? null) : null;
+    if ($tur >= 3 && is_array($ispIt) && isset($ispIt['offerFromId'], $ispIt['offerToId'])) {
+        $km = $db->fetchOne("
+            SELECT TOP 1 i.APIKampanyalar_Id
+            FROM APIKampanyalar i
+            OUTER APPLY (SELECT TOP 1 tv.APIKampanyalar_PaketAdi AS PaketAdi FROM APIKampanyalar tv
+                         WHERE tv.APIKampanyalar_Tur = ? AND tv.APIKampanyalar_OfferToId = ?) tv
+            WHERE i.APIKampanyalar_Tur = 3 AND i.APIKampanyalar_KategoriAdi = ?
+              AND i.APIKampanyalar_OfferFromId = ? AND i.APIKampanyalar_OfferToId = ?
+            ORDER BY CASE WHEN i.APIKampanyalar_PaketAdi = tv.PaketAdi THEN 0 ELSE 1 END, i.Durum DESC
+        ", [$kampanyaTur[$tur], (int)($tvIt['offerToId'] ?? 0), $tur === 3 ? 'ISP+NEO' : 'ISP+UYDU',
+            (int)$ispIt['offerFromId'], (int)$ispIt['offerToId']]);
+        if ($km) $kampanyaId = (int)$km['APIKampanyalar_Id'];
+    }
     $item = $kampanyaAlan[$tur] !== null
         ? ($in[$kampanyaAlan[$tur]] ?? null)
         : ($in['orderBasketSimulateItemList'][0] ?? null);
-    if (is_array($item) && isset($item['offerFromId'], $item['offerToId'])) {
+    if ($kampanyaId === null && is_array($item) && isset($item['offerFromId'], $item['offerToId'])) {
         $km = $db->fetchOne("
             SELECT APIKampanyalar_Id FROM APIKampanyalar
             WHERE APIKampanyalar_OfferFromId = ? AND APIKampanyalar_OfferToId = ? AND APIKampanyalar_Tur = ?
@@ -903,6 +942,7 @@ function handleCreateOrder($db, int $tur, string $rawBody): void
 
     // Yanıt iskeleti: Digiturk cevabı + Basvurular_id
     $out = is_array($json) ? $json : ['rawResponse' => (string)$resp];
+    if ($ispNot) $out['ispHazirlik'] = $ispNot;
 
     try {
         $basvuruId = $db->insert('Basvurular', $data);
@@ -1653,7 +1693,7 @@ function gelenToken(): string
  * Route'u APIEndpointler'da eşleştirir; isteği aynı metot + gövde ile,
  * gelen Token header'ını ekleyerek Digiturk'e iletir ve yanıtı aynen döndürür.
  */
-function handleProxy($db, string $route, string $method, string $rawBody, bool $bodyToQuery = false): void
+function handleProxy($db, string $route, string $method, string $rawBody, bool $bodyToQuery = false, int $timeout = 30): void
 {
     if ($route === '') {
         jsonOut(['data' => null, 'responseCode' => 404, 'responseMessage' => 'Endpoint belirtilmedi.'], 404);
@@ -1700,7 +1740,7 @@ function handleProxy($db, string $route, string $method, string $rawBody, bool $
     $ch = curl_init($url);
     curl_setopt_array($ch, [
         CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_TIMEOUT        => 30,
+        CURLOPT_TIMEOUT        => $timeout,
         CURLOPT_CUSTOMREQUEST  => $upstreamMethod,
         CURLOPT_HTTPHEADER     => $headers,
         CURLOPT_SSL_VERIFYPEER => false,

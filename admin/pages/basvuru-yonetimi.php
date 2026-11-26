@@ -249,23 +249,35 @@ function basvuruKayitKendiMi($db, int $kullaniciId, int $basvuruId): bool {
 
 /**
  * Başvuru için API gönderim verisini hazırlar (endpoint + token + body).
- * Endpoint: Kampanya Tur=1 → 15 (CreateNeo), Tur=2 → 16 (CreateSatellite)
+ * Endpoint: Kampanya Tur=1 → 15 (CreateNeo), Tur=2 → 16 (CreateSatellite),
+ *           Tur=3 (İnternet) → KategoriAdi ISP+NEO → 27 (CreateISPandNeo), ISP+UYDU → 28 (CreateISPandSatellite)
  * Token  : Basvurular.AltBayiPersonel_ID → DigiturkAltBayiPersonel_Token
+ * İnternetli siparişte gövde ispSiparisHazirla() ile canlı tamamlanır (aynı token ile kampanya
+ * sorgusu, TV/modem kalemi, zorunlu hediye). Hediye seçimi gerekiyorsa ok=false + hediyeSecimi döner;
+ * seçilen kalemler $hediye ile tekrar gönderilir.
  * @return array ['ok'=>bool, 'msg'=>?string, ...] hazırlık başarılıysa endpointId/url/method/token/personel/body döner.
  */
-function basvuruApiHazirla($db, int $basvuruId): array {
+function basvuruApiHazirla($db, int $basvuruId, array $hediye = []): array {
     global $kullaniciId;
     $b = $db->fetchOne("SELECT * FROM Basvurular WHERE Basvurular_id = ?", [$basvuruId]);
     if (!$b) return ['ok' => false, 'msg' => 'Başvuru bulunamadı'];
 
     if (empty($b['Kampanyalar_ID'])) return ['ok' => false, 'msg' => 'Başvuruda kampanya seçili değil'];
     $k = $db->fetchOne("
-        SELECT APIKampanyalar_Tur, APIKampanyalar_OfferToId, APIKampanyalar_OfferFromId, APIKampanyalar_FaturaDonemi
+        SELECT APIKampanyalar_Tur, APIKampanyalar_OfferToId, APIKampanyalar_OfferFromId, APIKampanyalar_FaturaDonemi,
+               APIKampanyalar_KategoriAdi
         FROM APIKampanyalar WHERE APIKampanyalar_Id = ?", [(int)$b['Kampanyalar_ID']]);
     if (!$k) return ['ok' => false, 'msg' => 'Kampanya kaydı bulunamadı (Id=' . (int)$b['Kampanyalar_ID'] . ')'];
 
-    $tur        = (int)$k['APIKampanyalar_Tur'];
-    $endpointId = $tur === 1 ? 15 : ($tur === 2 ? 16 : 0);
+    $tur = (int)$k['APIKampanyalar_Tur'];
+    // İnternet kampanyasında sipariş türü kategoriden: ISP+NEO → 3, ISP+UYDU → 4
+    $ispTur = 0;
+    if ($tur === 3) {
+        $kat    = strtoupper(trim((string)($k['APIKampanyalar_KategoriAdi'] ?? '')));
+        $ispTur = $kat === 'ISP+NEO' ? 3 : ($kat === 'ISP+UYDU' ? 4 : 0);
+        if (!$ispTur) return ['ok' => false, 'msg' => 'İnternet kampanyasının kategorisi ISP+NEO / ISP+UYDU değil (' . $kat . ')'];
+    }
+    $endpointId = $tur === 1 ? 15 : ($tur === 2 ? 16 : ($ispTur === 3 ? 27 : ($ispTur === 4 ? 28 : 0)));
     if (!$endpointId) return ['ok' => false, 'msg' => 'Kampanya türü API gönderimi için uygun değil (Tur=' . $tur . ')'];
     if (empty($k['APIKampanyalar_OfferToId']) || empty($k['APIKampanyalar_OfferFromId'])) {
         return ['ok' => false, 'msg' => 'Kampanyada OfferToId / OfferFromId eksik'];
@@ -366,6 +378,45 @@ function basvuruApiHazirla($db, int $basvuruId): array {
         'orderBasketSimulateItemGiftList' => [],
     ];
 
+    // İnternetli sipariş: gövde ISPAndNeoRequest / ISPAndSatelliteRequest biçimine çevrilir
+    // ve canlı kampanya sorgusuyla tamamlanır (TV + modem kalemi, zorunlu hediye).
+    $notlar = [];
+    if ($ispTur) {
+        require_once __DIR__ . '/../includes/DigiturkIspSiparis.php';
+        if (!ctype_digit($bbk) || (int)$bbk <= 0) {
+            return ['ok' => false, 'msg' => 'İnternet siparişinde BBK adres kodu zorunlu (başvuruda boş/geçersiz).'];
+        }
+        $tvAlan = $ispTur === 3 ? 'neoCampaignItem' : 'satelliteCampaignItem';
+        unset($body['orderBasketSimulateItemList'], $body['orderBasketSimulateItemGiftList']);
+        $body = [
+            $tvAlan                  => null, // canlı tekliften doldurulur
+            'ispCampaignItem'        => [
+                'offerFromId'   => (int)$k['APIKampanyalar_OfferFromId'],
+                'offerToId'     => (int)$k['APIKampanyalar_OfferToId'],
+                'frequency'     => 1,
+                'frequencyCode' => $k['APIKampanyalar_FaturaDonemi'] ?: 'AY',
+            ],
+            'modemCampaignItem'      => null, // addedModem=true → canlı tekliften
+            'additionalCampaignItem' => null,
+            'giftList'               => array_values($hediye),
+        ] + $body + [
+            'adslNo'             => '',
+            'pstnNo'             => null,
+            'addedModem'         => true,
+            'governmentApproval' => false,
+        ];
+        // Yönlendirme 0'da internet talebi adrese bakan bayiye gidiyor (test ortamında
+        // görüldü); formda 0 varsayılan olduğu için ISP'de 0 → 1 (bize) kullanılır.
+        if ((int)$body['ticketRoutingType'] === 0) unset($body['ticketRoutingType']);
+
+        try {
+            $notlar = ispSiparisHazirla($db, $ispTur, $body, (string)$per['DigiturkAltBayiPersonel_Token']);
+        } catch (IspSiparisHatasi $e) {
+            return ['ok' => false, 'msg' => $e->getMessage(),
+                    'hediyeSecimi' => $e->veri['hediyeSecimi'] ?? null];
+        }
+    }
+
     return [
         'ok'         => true,
         'endpointId' => $endpointId,
@@ -374,7 +425,26 @@ function basvuruApiHazirla($db, int $basvuruId): array {
         'token'      => $per['DigiturkAltBayiPersonel_Token'],
         'personel'   => $per['DigiturkAltBayiPersonel_AdSoyad'] ?? '',
         'body'       => $body,
+        'isp'        => (bool)$ispTur,
+        'notlar'     => $notlar,
     ];
+}
+
+/** POST'tan gelen hediye seçimini (JSON dizi) sipariş kalemlerine çevirir; geçersiz satırlar atılır. */
+function basvuruHediyeSecimi(): array {
+    $h = json_decode((string)($_POST['hediye'] ?? ''), true);
+    if (!is_array($h)) return [];
+    $out = [];
+    foreach ($h as $x) {
+        if (!is_array($x) || empty($x['offerFromId']) || empty($x['offerToId'])) continue;
+        $out[] = [
+            'offerFromId'   => (int)$x['offerFromId'],
+            'offerToId'     => (int)$x['offerToId'],
+            'frequency'     => max(1, (int)($x['frequency'] ?? 1)),
+            'frequencyCode' => preg_replace('/[^A-Z]/', '', strtoupper((string)($x['frequencyCode'] ?? 'AY'))) ?: 'AY',
+        ];
+    }
+    return $out;
 }
 
 /**
@@ -1554,8 +1624,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     break;
                 }
 
-                $h = basvuruApiHazirla($db, $id);
-                if (!$h['ok']) { echo json_encode(['success' => false, 'message' => $h['msg']]); break; }
+                @set_time_limit(600); // internet kampanya sorgusu uzun sürebilir
+                $h = basvuruApiHazirla($db, $id, basvuruHediyeSecimi());
+                if (!$h['ok']) {
+                    echo json_encode(['success' => false, 'message' => $h['msg'], 'hediyeSecimi' => $h['hediyeSecimi'] ?? null]);
+                    break;
+                }
                 echo json_encode([
                     'success'  => true,
                     'mode'     => 'siparis',
@@ -1563,6 +1637,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'method'   => $h['method'],
                     'personel' => $h['personel'],
                     'body'     => $h['body'],
+                    'isp'      => $h['isp'],
+                    'notlar'   => $h['notlar'],
                 ]);
                 break;
             }
@@ -1673,8 +1749,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                 // ── Sipariş oluştur (Endpoint 15/16) — YALNIZ TalepKayitNo BOŞSA ──
                 if (empty($talepKayitNo)) {
-                    $h = basvuruApiHazirla($db, $id);
-                    if (!$h['ok']) { echo json_encode(['success' => false, 'message' => $h['msg']]); break; }
+                    @set_time_limit(600); // internet: kampanya sorgusu + sipariş
+                    $h = basvuruApiHazirla($db, $id, basvuruHediyeSecimi());
+                    if (!$h['ok']) {
+                        echo json_encode(['success' => false, 'message' => $h['msg'], 'hediyeSecimi' => $h['hediyeSecimi'] ?? null]);
+                        break;
+                    }
                     $token = $h['token'];
 
                     $gonderilen = json_encode($h['body'], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
@@ -1686,7 +1766,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         CURLOPT_POSTFIELDS     => json_encode($h['body'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
                         CURLOPT_HTTPHEADER     => ['Content-Type: application/json', 'Accept: application/json', 'Token: ' . $token],
                         CURLOPT_SSL_VERIFYPEER => false,
-                        CURLOPT_TIMEOUT        => 60,
+                        CURLOPT_TIMEOUT        => !empty($h['isp']) ? ISP_CCAPI_TIMEOUT : 60,
                     ]);
                     $resp = curl_exec($ch);
                     $http = curl_getinfo($ch, CURLINFO_HTTP_CODE);
@@ -2234,6 +2314,8 @@ $dagitLeadFormlari = $db->fetchAll("
             </div>
             <div class="modal-body">
                 <div id="apiMeta" class="mb-2 small text-muted"></div>
+                <!-- İnternetli siparişte zorunlu hediye seçimi (Digiturk GetOfferGiftsByOfferId) -->
+                <div id="apiHediye" class="mb-3 d-none"></div>
                 <label class="form-label fw-bold mb-1"><i class="bi bi-box-arrow-up-right"></i> Gönderilecek Veri</label>
                 <pre class="json-box" id="apiGonderilen">—</pre>
                 <label class="form-label fw-bold mb-1 mt-3"><i class="bi bi-box-arrow-in-down-left"></i> API Yanıtı</label>
@@ -3347,17 +3429,68 @@ $dagitLeadFormlari = $db->fetchAll("
     }
 
     // ===== API'ye Gönder =====
+    // İnternetli siparişte seçilen hediye kalemleri (giftList) — önizleme ve gönderimde aynı değer gider
+    let apiHediyeSecim = [];
+
     function apiGonderAc(id) {
         apiAktifId = id;
-        $('#apiMeta').html('');
-        $('#apiGonderilen').text('Yükleniyor...');
+        apiHediyeSecim = [];
+        $('#apiHediye').addClass('d-none').empty();
         $('#apiYanit').text('— Henüz gönderilmedi —');
-        $('#btnApiGonder').prop('disabled', true);
         apiModal.show();
-        $.post('', { action: 'api_onizle', id: id }, function (r) {
+        apiOnizle();
+    }
+
+    /** Hediye grubu seçimlerini (data-kalemler JSON) toplar */
+    function apiHediyeTopla() {
+        const secim = [];
+        $('#apiHediye select').each(function () {
+            const v = $(this).val();
+            (Array.isArray(v) ? v : (v ? [v] : [])).forEach(function (s) { secim.push(JSON.parse(s)); });
+        });
+        return secim;
+    }
+
+    /** Digiturk'ün döndürdüğü zorunlu hediye gruplarını seçim kutusu olarak çizer */
+    function apiHediyeCiz(gruplar) {
+        const $k = $('#apiHediye').empty().removeClass('d-none');
+        $k.append('<div class="alert alert-warning py-2 mb-2"><i class="bi bi-gift"></i> Kampanyada zorunlu hediye seçimi var. Seçim yapınca önizleme yenilenir.</div>');
+        gruplar.forEach(function (g, i) {
+            const coklu = g.secilecek > 1;
+            const $s = $('<select class="form-select" id="apiHediyeSec' + i + '"' + (coklu ? ' multiple' : '') + '></select>');
+            if (!coklu) $s.append('<option value="">Seçiniz...</option>');
+            g.secenekler.forEach(function (o) {
+                const val = JSON.stringify({ offerFromId: o.offerFromId, offerToId: o.offerToId, frequency: o.frequency, frequencyCode: o.frequencyCode });
+                $s.append($('<option>').val(val).text(o.ad || (o.offerFromId + '/' + o.offerToId)));
+            });
+            $k.append($('<div class="mb-2">')
+                .append('<label class="form-label small fw-bold mb-1" for="apiHediyeSec' + i + '">' + escapeHtml(g.grup)
+                        + ' <span class="text-muted fw-normal">(' + g.secilecek + ' adet seçilecek)</span></label>')
+                .append($s));
+            $s.select2({ theme: 'bootstrap-5', width: '100%', dropdownParent: $('#apiModal'), placeholder: 'Seçiniz...' });
+            $s.on('change', function () {
+                const toplam = $('#apiHediye select').toArray().every(function (el) {
+                    const v = $(el).val(); return Array.isArray(v) ? v.length > 0 : !!v;
+                });
+                if (!toplam) return;
+                apiHediyeSecim = apiHediyeTopla();
+                apiOnizle(true);
+            });
+        });
+    }
+
+    function apiOnizle(hediyeKorunsun) {
+        const id = apiAktifId;
+        $('#apiMeta').html('<span class="spinner-border spinner-border-sm"></span> Hazırlanıyor... '
+            + '<span class="text-muted">(internet kampanyalarında Digiturk adres sorgusu 2 dakikayı bulabilir)</span>');
+        $('#apiGonderilen').text('Yükleniyor...');
+        $('#btnApiGonder').prop('disabled', true);
+        $.post('', { action: 'api_onizle', id: id, hediye: JSON.stringify(apiHediyeSecim) }, function (r) {
+            if (id !== apiAktifId) return; // modal başka kayıtla yeniden açıldı
             if (!r.success) {
                 $('#apiGonderilen').text('');
                 $('#apiMeta').html('<span class="text-danger"><i class="bi bi-exclamation-triangle"></i> ' + escapeHtml(r.message) + '</span>');
+                if (r.hediyeSecimi && r.hediyeSecimi.length && !hediyeKorunsun) apiHediyeCiz(r.hediyeSecimi);
                 return;
             }
             if (r.mode === 'surec') {
@@ -3366,9 +3499,11 @@ $dagitLeadFormlari = $db->fetchAll("
                 $('#btnApiGonder').prop('disabled', false);
                 return;
             }
+            const notlar = r.notlar ? Object.values(r.notlar) : [];
             $('#apiMeta').html(
                 '<b>Endpoint:</b> <span class="mono">' + escapeHtml(r.method + ' ' + r.endpoint) + '</span><br>' +
-                '<b>Token Personeli:</b> ' + escapeHtml(r.personel || '-')
+                '<b>Token Personeli:</b> ' + escapeHtml(r.personel || '-') +
+                (notlar.length ? '<br><b>İnternet hazırlığı:</b> ' + notlar.map(escapeHtml).join(' · ') : '')
             );
             $('#apiGonderilen').text(JSON.stringify(r.body, null, 2));
             $('#btnApiGonder').prop('disabled', false);
@@ -3384,8 +3519,9 @@ $dagitLeadFormlari = $db->fetchAll("
         const eski = $btn.html();
         $btn.prop('disabled', true).html('<span class="spinner-border spinner-border-sm"></span> Gönderiliyor...');
         $('#apiYanit').text('Bekleniyor...');
-        $.post('', { action: 'api_gonder', id: apiAktifId }, function (r) {
+        $.post('', { action: 'api_gonder', id: apiAktifId, hediye: JSON.stringify(apiHediyeSecim) }, function (r) {
             if (!r.success) {
+                if (r.hediyeSecimi && r.hediyeSecimi.length && !$('#apiHediye select').length) apiHediyeCiz(r.hediyeSecimi);
                 $('#apiYanit').text(r.message || 'Hata');
                 if (r.gonderilen) $('#apiGonderilen').text(r.gonderilen);
                 showError('Hata!', r.message || 'Gönderim başarısız');
