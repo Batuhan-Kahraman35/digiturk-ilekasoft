@@ -207,7 +207,8 @@ function irisPost($ch, string $endpoint, $body, ?string &$webToken, ?string $ver
     curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
     $response = curl_exec($ch);
     $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    if (curl_errno($ch))  throw new RuntimeException('cURL: ' . curl_error($ch));
+    // Hangi çağrıda koptuğu ve isteğin ne kadar beklediği loga düşsün (bağlantı kopması teşhisi)
+    if (curl_errno($ch))  throw new RuntimeException(sprintf('cURL [%s, %.1f sn]: %s', $endpoint, (float)curl_getinfo($ch, CURLINFO_TOTAL_TIME), curl_error($ch)));
     if ($httpCode >= 400) {
         // Yanıt gövdesi olmadan "HTTP 500" teşhis edilemiyor; servisin gerekçesini mesaja taşı.
         $j       = json_decode($response, true);
@@ -878,6 +879,7 @@ function gorevIrisRapor(array $params, $db): array
 {
     ob_start();
     set_time_limit(600);
+    $adim = 'hazırlık'; // hata mesajına eklenir: akışın hangi aşamasında kesildiği
 
     try {
         $baslangicParam = trim($params['baslangic'] ?? '');
@@ -913,6 +915,7 @@ function gorevIrisRapor(array $params, $db): array
         curl_setopt_array($ch, [CURLOPT_COOKIEFILE => '', CURLOPT_RETURNTRANSFER => true, CURLOPT_SSL_VERIFYPEER => true, CURLOPT_CONNECTTIMEOUT => 30, CURLOPT_TIMEOUT => IRIS_HTTP_TIMEOUT, CURLOPT_ENCODING => '']);
 
         $webToken = $verToken = null;
+        $adim = 'giriş';
         $r = irisPost($ch, 'Auth/GetToken', new stdClass(), $webToken, $verToken); $webToken = $r['token'];
         try {
             $r = irisPost($ch, 'Auth/Login', ['DealerCode' => $dealerCode, 'UserCode' => $userCode, 'Password' => $password, 'Language' => 'tr'], $webToken, $verToken);
@@ -928,6 +931,7 @@ function gorevIrisRapor(array $params, $db): array
         $db->update('DigiturkAltBayiPersonel', ['DigiturkAltBayiPersonel_WebToken' => $verToken, 'DigiturkAltBayiPersonel_WebTokenSuresi' => date('Y-m-d H:i:s', strtotime('+3 hours')), 'DigiturkAltBayiPersonel_WebTokenDurum' => 1, 'GuncelleyenKullanici' => 1, 'GuncellemeTarihi' => date('Y-m-d H:i:s')], ['DigiturkAltBayiPersonel_Id' => $personelId]);
 
         // Seçilen rapor bu personelde açık mı? (alt bayide "Tüm Kayıtlar" listede yer almaz)
+        $adim = 'rapor tanımı';
         $r = irisPost($ch, 'Auth/GetToken', new stdClass(), $webToken, $verToken); $webToken = $r['token'];
         $r = irisPost($ch, 'Report/GetReportDefinitionList', new stdClass(), $webToken, $verToken);
         $tanimlar  = $r['Data'] ?? $r['DataList'] ?? $r['EntityDataList'] ?? [];
@@ -955,6 +959,8 @@ function gorevIrisRapor(array $params, $db): array
 
         foreach ($chunks as $chunk) {
             echo "  Parça: {$chunk['start']} — {$chunk['end']}\n";
+            $parca = "parça {$chunk['start']}-{$chunk['end']}";
+            $adim  = "{$parca}, kuyruğa ekleme";
             $r = irisPost($ch, 'Auth/GetToken', new stdClass(), $webToken, $verToken); $webToken = $r['token'];
             $r = irisPost($ch, 'Report/GetReportList', new stdClass(), $webToken, $verToken);
             // IRIS liste yanıtını 'Data' altında döndürüyor; 'DataList'/'EntityDataList'
@@ -967,6 +973,7 @@ function gorevIrisRapor(array $params, $db): array
             $elapsed = 0; $raporBilgi = null;
             while ($elapsed < IRIS_POLL_TIMEOUT) {
                 sleep(IRIS_POLL_INTERVAL); $elapsed += IRIS_POLL_INTERVAL;
+                $adim = "{$parca}, rapor bekleme {$elapsed}. sn";
                 $r2 = irisPost($ch, 'Auth/GetToken', new stdClass(), $webToken, $verToken); $webToken = $r2['token'];
                 $r2 = irisPost($ch, 'Report/GetReportList', new stdClass(), $webToken, $verToken);
                 foreach ($r2['DataList'] ?? $r2['EntityDataList'] ?? $r2['Data'] ?? [] as $rr) {
@@ -977,6 +984,7 @@ function gorevIrisRapor(array $params, $db): array
             }
             if (!$raporBilgi) { echo "  Zaman aşımı, atlanıyor.\n"; continue; }
 
+            $adim = "{$parca}, içerik indirme (rapor #{$raporBilgi['id']})";
             $r2 = irisPost($ch, 'Auth/GetToken', new stdClass(), $webToken, $verToken); $webToken = $r2['token'];
             $r2 = irisPost($ch, 'Report/GetReportContent', ['ReportRequestId' => $raporBilgi['id']], $webToken, $verToken);
             $csvData = base64_decode($r2['Data'] ?? $r2['EntityData'] ?? '');
@@ -987,6 +995,7 @@ function gorevIrisRapor(array $params, $db): array
             $dosyaAdi = 'IrisRapor-' . $chunk['start'] . '-' . $chunk['end'] . '_' . date('Ymd_His') . '.csv';
             $dosyaYol = $tmpDir . '/' . $dosyaAdi;
             file_put_contents($dosyaYol, $csvData);
+            $adim = "{$parca}, CSV içe aktarma";
             $cs = irisImportCsv($dosyaYol, $personelId, $dosyaAdi, $db);
             @unlink($dosyaYol);
             $totalStats['inserted'] += $cs['inserted']; $totalStats['updated'] += $cs['updated']; $totalStats['skipped'] += $cs['skipped'];
@@ -995,7 +1004,7 @@ function gorevIrisRapor(array $params, $db): array
         curl_close($ch);
         $sonuc = "{$totalStats['inserted']} kayıt eklendi, {$totalStats['updated']} güncellendi, {$totalStats['skipped']} atlandı.";
         $durum = 1;
-    } catch (Throwable $e) { $sonuc = get_class($e) . ': ' . $e->getMessage(); $durum = 2; }
+    } catch (Throwable $e) { $sonuc = get_class($e) . ': ' . $e->getMessage() . " (aşama: {$adim})"; $durum = 2; }
 
     return ['durum' => $durum, 'sonuc' => $sonuc, 'cikti' => ob_get_clean()];
 }
