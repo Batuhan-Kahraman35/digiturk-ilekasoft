@@ -30,6 +30,23 @@ define('CRON_KEY',    htmlspecialchars(cronAnahtari($db)));
 define('RUNNER_URL',  (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? 'https' : 'http') . '://' . $_SERVER['HTTP_HOST'] . '/cron/runner.php');
 define('WORKER_URL',  (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? 'https' : 'http') . '://' . $_SERVER['HTTP_HOST'] . '/cron/worker.php');
 
+/**
+ * Görev şemasındaki zorunlu alanları denetler.
+ * zorunlu:true → her zaman; zorunluIslem:"rapor" (virgülle birden fazla) → yalnız islem o değerdeyken.
+ */
+function cronParamZorunluKontrol(array $schema, array $params): void
+{
+    $islem = trim((string)($params['islem'] ?? ''));
+    foreach ($schema as $p) {
+        $zorunlu = !empty($p['zorunlu'])
+            || (!empty($p['zorunluIslem'])
+                && in_array($islem, array_map('trim', explode(',', (string)$p['zorunluIslem'])), true));
+        if ($zorunlu && trim((string)($params[$p['ad']] ?? '')) === '') {
+            throw new Exception("'{$p['etiket']}' parametresi zorunludur.");
+        }
+    }
+}
+
 // ─── AJAX ────────────────────────────────────────────────────────────────────
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (ob_get_level()) ob_end_clean();
@@ -146,6 +163,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $sparams = trim($_POST['sabit_params'] ?? '') ?: null;
             $telafi  = max(0, intval($_POST['telafi_dakika'] ?? 0)) ?: null;
             if (!$gorevId || !$ad || !$cron) throw new Exception('Görev, ad ve cron ifadesi zorunludur.');
+            $sema = $db->fetchOne("SELECT CronGorevler_Parametreler FROM CronGorevler WHERE CronGorevler_Id = ?", [$gorevId]);
+            cronParamZorunluKontrol(json_decode($sema['CronGorevler_Parametreler'] ?? '[]', true) ?: [],
+                                    json_decode($sparams ?? '{}', true) ?: []);
             $simdi = date('Y-m-d H:i:s');
             $db->insert('CronZamanlamalar', [
                 'CronZamanlamalar_GorevId'          => $gorevId,
@@ -176,6 +196,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $sparams = trim($_POST['sabit_params'] ?? '') ?: null;
             $telafi  = max(0, intval($_POST['telafi_dakika'] ?? 0)) ?: null;
             if (!$id || !$ad || !$cron) throw new Exception('Id, ad ve cron ifadesi zorunludur.');
+            $sema = $db->fetchOne("SELECT g.CronGorevler_Parametreler FROM CronZamanlamalar z
+                                   INNER JOIN CronGorevler g ON z.CronZamanlamalar_GorevId = g.CronGorevler_Id
+                                   WHERE z.CronZamanlamalar_Id = ?", [$id]);
+            cronParamZorunluKontrol(json_decode($sema['CronGorevler_Parametreler'] ?? '[]', true) ?: [],
+                                    json_decode($sparams ?? '{}', true) ?: []);
             $db->update('CronZamanlamalar', [
                 'CronZamanlamalar_Ad'               => $ad,
                 'CronZamanlamalar_CronIfadesi'      => $cron,
@@ -249,9 +274,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $params      = [];
                 foreach ($schema as $p) {
                     $val = trim($_POST[$p['ad']] ?? '');
-                    if (($p['zorunlu'] ?? false) && $val === '') throw new Exception("'{$p['etiket']}' parametresi zorunludur.");
                     if ($val !== '') $params[$p['ad']] = $val;
                 }
+                cronParamZorunluKontrol($schema, $params);
             }
 
             $logId    = cronLogOlustur($db, $gorevId, $zamanlamaId, $params, 0, $user['kullanici_id']);
@@ -865,6 +890,19 @@ function telafiAlaniDoldur(dakika) {
     document.getElementById('z_telafi_dakika').disabled = !acik;
 }
 
+// Şemada zorunluIslem verilen alan yalnız o işlem seçiliyken zorunludur (ör. rapor_tipi → islem=rapor).
+// Sunucudaki karşılığı: cronParamZorunluKontrol()
+function paramZorunlu(p, islem) {
+    if (p.zorunlu) return true;
+    return !!p.zorunluIslem && String(p.zorunluIslem).split(',').map(s => s.trim()).includes(String(islem || ''));
+}
+
+function zorunluIsaret(p) {
+    if (p.zorunlu) return '<span class="text-danger">*</span>';
+    if (p.zorunluIslem) return `<span class="text-danger" title="İşlem: ${esc(p.zorunluIslem)} seçiliyse zorunlu">*</span>`;
+    return '';
+}
+
 function renderZamanlamaParams(schema, values) {
     const $alan = $('#z_params_alan').empty();
     schema.forEach(function (p) {
@@ -872,7 +910,7 @@ function renderZamanlamaParams(schema, values) {
         if (COKLU_TIPLER.includes(p.tip)) {
             $alan.append(`
             <div class="mb-2">
-                <label class="form-label mb-1">${esc(p.etiket)} ${p.zorunlu ? '<span class="text-danger">*</span>' : ''}</label>
+                <label class="form-label mb-1">${esc(p.etiket)} ${zorunluIsaret(p)}</label>
                 <select class="form-select form-select-sm" id="zp_${p.ad}" multiple></select>
             </div>`);
             cokluSecimKur('#zp_' + p.ad, '#zamanlamaModal', val, p.tip, p.bilgi);
@@ -880,14 +918,14 @@ function renderZamanlamaParams(schema, values) {
             const opts = secimOptions(p.tip, val, p);
             $alan.append(`
             <div class="mb-2">
-                <label class="form-label mb-1">${esc(p.etiket)} ${p.zorunlu ? '<span class="text-danger">*</span>' : ''}</label>
+                <label class="form-label mb-1">${esc(p.etiket)} ${zorunluIsaret(p)}</label>
                 <select class="form-select form-select-sm" id="zp_${p.ad}">${opts}</select>
             </div>`);
             modalSelect2('#zp_' + p.ad, '#zamanlamaModal');
         } else {
             $alan.append(`
             <div class="mb-2">
-                <label class="form-label mb-1">${esc(p.etiket)} ${p.zorunlu ? '<span class="text-danger">*</span>' : ''}</label>
+                <label class="form-label mb-1">${esc(p.etiket)} ${zorunluIsaret(p)}</label>
                 <input type="text" class="form-control form-control-sm" id="zp_${p.ad}" value="${esc(val)}" placeholder="${esc(p.tip === 'tarih' ? '{dun} ya da dd.mm.yyyy' : '')}">
             </div>`);
         }
@@ -1028,6 +1066,8 @@ function zamanlamaKaydet() {
     const params = JSON.parse((g?.CronGorevler_Parametreler) || '[]');
     const pObj   = {};
     params.forEach(p => { const v = paramDeger('#zp_' + p.ad); if (v) pObj[p.ad] = v; });
+    const eksik = params.find(p => paramZorunlu(p, pObj.islem) && !pObj[p.ad]);
+    if (eksik) { showToast(eksik.etiket + ' zorunludur.', 'warning'); return; }
 
     const data = {
         action:       id ? 'zamanlama_guncelle' : 'zamanlama_ekle',
@@ -1115,7 +1155,7 @@ function renderTetikleParams(params, values) {
         if (COKLU_TIPLER.includes(p.tip)) {
             $alan.append(`
             <div class="mb-3">
-                <label class="form-label">${esc(p.etiket)} ${p.zorunlu ? '<span class="text-danger">*</span>' : ''}</label>
+                <label class="form-label">${esc(p.etiket)} ${zorunluIsaret(p)}</label>
                 <select class="form-select" id="tp_${p.ad}" multiple></select>
             </div>`);
             cokluSecimKur('#tp_' + p.ad, '#tetikleModal', saved, p.tip, p.bilgi);
@@ -1125,7 +1165,7 @@ function renderTetikleParams(params, values) {
             const opts = secimOptions(p.tip, saved, p);
             $alan.append(`
             <div class="mb-3">
-                <label class="form-label">${esc(p.etiket)} ${p.zorunlu ? '<span class="text-danger">*</span>' : ''}</label>
+                <label class="form-label">${esc(p.etiket)} ${zorunluIsaret(p)}</label>
                 <select class="form-select" id="tp_${p.ad}">${opts}</select>
             </div>`);
             modalSelect2('#tp_' + p.ad, '#tetikleModal');
@@ -1135,7 +1175,7 @@ function renderTetikleParams(params, values) {
         const inputVal = isDate && saved && !saved.startsWith('{') ? saved.split('.').reverse().join('-') : '';
         $alan.append(`
         <div class="mb-3">
-            <label class="form-label">${esc(p.etiket)} ${p.zorunlu ? '<span class="text-danger">*</span>' : ''}</label>
+            <label class="form-label">${esc(p.etiket)} ${zorunluIsaret(p)}</label>
             <input type="${isDate ? 'date' : 'text'}" class="form-control" id="tp_${p.ad}" value="${esc(inputVal || '')}">
             ${saved ? `<div class="form-text">Kayıtlı: <code>${esc(saved)}</code></div>` : ''}
         </div>`);
@@ -1153,9 +1193,10 @@ function tetikleBaslat() {
     // Zamanlayıcı tetiklemesinde parametreler DB'den gelir; form validasyonu sadece manuel çalıştırmada yapılır
     if (!zamanlamaId) {
         const params = JSON.parse(g.CronGorevler_Parametreler || '[]');
+        const islem  = $('#tp_islem').length ? paramDeger('#tp_islem') : '';
         for (const p of params) {
             const val = paramDeger('#tp_' + p.ad);
-            if ((p.zorunlu ?? false) && !val) { showToast(p.etiket + ' zorunludur.', 'warning'); return; }
+            if (paramZorunlu(p, islem) && !val) { showToast(p.etiket + ' zorunludur.', 'warning'); return; }
             if (val) data[p.ad] = p.tip === 'tarih' && /^\d{4}-\d{2}-\d{2}$/.test(val) ? val.split('-').reverse().join('.') : val;
         }
     }

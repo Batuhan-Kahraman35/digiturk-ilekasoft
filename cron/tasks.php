@@ -4,7 +4,6 @@
  */
 
 defined('IRIS_BASE_URL')      || define('IRIS_BASE_URL',      'https://iris.digiturk.com.tr/api');
-defined('IRIS_REPORT_SPEC')   || define('IRIS_REPORT_SPEC',   10);
 defined('IRIS_MAX_DAYS')      || define('IRIS_MAX_DAYS',      30);
 defined('IRIS_POLL_INTERVAL') || define('IRIS_POLL_INTERVAL', 10);
 defined('IRIS_POLL_TIMEOUT')  || define('IRIS_POLL_TIMEOUT',  300);
@@ -885,6 +884,11 @@ function gorevIrisRapor(array $params, $db): array
         $bitisParam     = trim($params['bitis']     ?? '');
         if (!$baslangicParam || !$bitisParam) { $cikti = ob_get_clean(); return ['durum' => 2, 'sonuc' => 'baslangic ve bitis parametreleri zorunludur (dd.mm.yyyy).', 'cikti' => $cikti]; }
 
+        // IRIS rapor türü (reportVersionSpecId) zamanlayıcıdan seçilir: ana bayide 10 (Tüm Kayıtlar),
+        // alt bayide 11 (Altbayiye ait) / 12 (Kendi açtığı). Seçenekler görev şemasında (DB).
+        $raporTipi = (int)($params['rapor_tipi'] ?? 0);
+        if ($raporTipi <= 0) { $cikti = ob_get_clean(); return ['durum' => 2, 'sonuc' => 'rapor_tipi parametresi zorunludur (zamanlayıcıdan IRIS rapor türünü seçin).', 'cikti' => $cikti]; }
+
         // Zamanlayıcıdan personel seçilebilir; boş bırakılırsa eski davranış (sabit IRIS personeli).
         $hedefPersonelId = (int)($params['personel_id'] ?? 0) ?: IRIS_PERSONEL_ID;
 
@@ -923,6 +927,20 @@ function gorevIrisRapor(array $params, $db): array
 
         $db->update('DigiturkAltBayiPersonel', ['DigiturkAltBayiPersonel_WebToken' => $verToken, 'DigiturkAltBayiPersonel_WebTokenSuresi' => date('Y-m-d H:i:s', strtotime('+3 hours')), 'DigiturkAltBayiPersonel_WebTokenDurum' => 1, 'GuncelleyenKullanici' => 1, 'GuncellemeTarihi' => date('Y-m-d H:i:s')], ['DigiturkAltBayiPersonel_Id' => $personelId]);
 
+        // Seçilen rapor bu personelde açık mı? (alt bayide "Tüm Kayıtlar" listede yer almaz)
+        $r = irisPost($ch, 'Auth/GetToken', new stdClass(), $webToken, $verToken); $webToken = $r['token'];
+        $r = irisPost($ch, 'Report/GetReportDefinitionList', new stdClass(), $webToken, $verToken);
+        $tanimlar  = $r['Data'] ?? $r['DataList'] ?? $r['EntityDataList'] ?? [];
+        $raporTanim = null;
+        foreach ($tanimlar as $t) { if ((int)($t['reportVersionSpecId'] ?? 0) === $raporTipi) { $raporTanim = $t; break; } }
+        if (!$raporTanim) {
+            $talepRaporlari = array_filter($tanimlar, fn($t) => stripos((string)($t['name'] ?? ''), 'Talep Raporu') !== false);
+            $acik = implode('; ', array_map(fn($t) => "{$t['reportVersionSpecId']} = {$t['name']}", $talepRaporlari)) ?: 'yok';
+            throw new RuntimeException("Seçilen IRIS rapor türü ({$raporTipi}) bu personelde açık değil. Açık talep raporları: {$acik}");
+        }
+        $raporLimit = $raporTanim['parameterDefinition']['requestLimit'] ?? ['requestPeriodAsMinute' => 60, 'maxRequestCount' => 10];
+        echo "  Rapor: #{$raporTipi} " . ($raporTanim['name'] ?? '') . "\n";
+
         // Tarihler ters girilmişse otomatik düzelt
         $sDate = DateTime::createFromFormat('d.m.Y', $baslangicParam);
         $eDate = DateTime::createFromFormat('d.m.Y', $bitisParam);
@@ -943,7 +961,7 @@ function gorevIrisRapor(array $params, $db): array
             // eski sürümler için korunuyor.
             $oncekiIdler = array_map(fn($x) => $x['reportRequestId'] ?? $x['ReportRequestId'] ?? 0, $r['DataList'] ?? $r['EntityDataList'] ?? $r['Data'] ?? []);
 
-            $r = irisPost($ch, 'Report/AddQueue', ['reportVersionSpecId' => IRIS_REPORT_SPEC, 'requestParams' => json_encode(['BayiKodu' => $dealerCode, 'IlkTarih' => $chunk['start'], 'SonTarih' => $chunk['end']]), 'requestType' => 0, 'requestLimit' => ['requestPeriodAsMinute' => 60, 'maxRequestCount' => 10]], $webToken, $verToken);
+            $r = irisPost($ch, 'Report/AddQueue', ['reportVersionSpecId' => $raporTipi, 'requestParams' => json_encode(['BayiKodu' => $dealerCode, 'IlkTarih' => $chunk['start'], 'SonTarih' => $chunk['end']]), 'requestType' => 0, 'requestLimit' => $raporLimit], $webToken, $verToken);
             if (($r['ResponseCode'] ?? -1) !== 0) { echo "  Kuyruk eklenemedi, atlanıyor.\n"; continue; }
 
             $elapsed = 0; $raporBilgi = null;
@@ -2996,6 +3014,13 @@ function gorevBasvuruSurecGuncelle(array $params, $db): array
         $finalHaric = !isset($params['final_haric']) || $params['final_haric'] === '' || (int)$params['final_haric'] === 1;
         $anaBayiFiltre = (int)($params['ana_bayi_id'] ?? 0);
 
+        // ccapi token'ı alınacak personel zamanlayıcıdan seçilir (zorunlu)
+        $surecPersonel = (int)($params['personel_id'] ?? 0);
+        if ($surecPersonel <= 0) throw new RuntimeException('personel_id parametresi zorunludur (zamanlayıcıdan ccapi sorgu personelini seçin).');
+        $perAd = $db->fetchOne("SELECT DigiturkAltBayiPersonel_AdSoyad AS ad FROM DigiturkAltBayiPersonel WHERE DigiturkAltBayiPersonel_Id = ? AND Durum = 1", [$surecPersonel]);
+        if (!$perAd) throw new RuntimeException("Süreç personeli bulunamadı veya pasif (#{$surecPersonel}).");
+        echo "  Sorgu personeli: #{$surecPersonel} {$perAd['ad']}\n";
+
         // Kolonlar b. ile nitelenir: sorgu ana bayiyi çözmek için JOIN içeriyor
         $where = ["b.TalepKayitNo IS NOT NULL", "b.TalepKayitNo > 0"];
         if ($anaBayiFiltre > 0) {
@@ -3048,7 +3073,7 @@ function gorevBasvuruSurecGuncelle(array $params, $db): array
             $hedef = $anaBayiId > 0 ? $anaBayiId : null;
             echo "  → Ana bayi " . ($hedef ?? 'varsayılan') . ": " . count($nolar) . " talep sorgulanıyor.\n";
             try {
-                $apiSonuc += irisDurumSorgula($db, $nolar, $hedef);
+                $apiSonuc += irisDurumSorgula($db, $nolar, $hedef, IRIS_CAGRI_BEKLEME, $surecPersonel);
                 $sorulanNolar = array_merge($sorulanNolar, $nolar);
             } catch (Throwable $ex) {
                 // Limit/bağlantı hatasında bu grubu bırak, diğer bayiler devam etsin
@@ -4266,11 +4291,11 @@ function gorevFiksturKazi(array $params, $db): array
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// IRIS Talep Eşleştirme — iris-talep-eslestirme.php Toplu Eşleştirme sekmesinin
-// cron karşılığı. Telefonla IRIS'te talep arar, "Talep Kaydeden"i personelimizle
-// eşleştirir ve eşleşenleri Basvurular'a yazar.
+// IRIS Talep Eşleştirme (panel sayfası 25.11.2026'da kaldırıldı, iş yalnız cron'da).
+// Telefonla IRIS'te talep arar, "Talep Kaydeden"i personelimizle eşleştirir ve
+// eşleşenleri Basvurular'a yazar. Oturum zamanlayıcıdaki personelle açılır.
 //
-// Panelden farkı seçim adımının olmaması: yalnız GÜVENLİ satırlar yazılır —
+// Seçim adımı yoktur: yalnız GÜVENLİ satırlar yazılır —
 // sonuç 'eslesti' olacak VE talep başka bir başvuruya bağlı olmayacak.
 // 'personel_eslesmedi' / 'talep_yok' kayıtlarına dokunulmaz, yalnız kontrol
 // tarihleri damgalanır (aynı kayıtlar her turda yeniden sorulmasın diye).
@@ -4282,6 +4307,11 @@ function gorevFiksturKazi(array $params, $db): array
 // ═════════════════════════════════════════════════════════════════════════════
 function gorevIrisTalepEslestir(array $params, $db): array
 {
+    // IRIS oturumunu açacak personel zamanlayıcıdan seçilir (zorunlu)
+    if ((int)($params['personel_id'] ?? 0) <= 0) {
+        return ['durum' => 2, 'sonuc' => 'personel_id parametresi zorunludur (zamanlayıcıdan IRIS oturum personelini seçin).', 'cikti' => ''];
+    }
+
     if (strtolower(trim($params['yontem'] ?? '')) === 'rapor') {
         return gorevIrisTalepRapordanEslestir($params, $db);
     }
@@ -4292,6 +4322,7 @@ function gorevIrisTalepEslestir(array $params, $db): array
     require_once dirname(__DIR__) . '/admin/includes/IrisTalepServisi.php';
 
     $sonuc = ''; $durum = 1;
+    $eslestirPersonel = (int)$params['personel_id'];
 
     try {
         $adet    = max(1, min(500, (int)($params['adet'] ?? 200) ?: 200));
@@ -4330,9 +4361,11 @@ function gorevIrisTalepEslestir(array $params, $db): array
 
         $perMap   = irisPersonelHaritasi($db);
         $durumMap = irisDurumKoduHaritasi($db);
-        // ana_bayi_id verilmezse panelin varsayılan hesabı (IrisTalepVarsayilan bayrağı)
-        $o        = irisTalepOturum($db, (int)($params['ana_bayi_id'] ?? 0) ?: null);
-        echo "  IRIS oturumu: {$o['hesap']['ad']} ({$o['hesap']['bayiKodu']}) — rol {$o['hesap']['rol']}\n\n";
+        // Oturum zamanlayıcıda seçilen personelle açılır (zorunlu; alt bayide ana bayi şifresi yok)
+        $o        = irisTalepOturum($db, $eslestirPersonel);
+        echo "  IRIS oturumu: {$o['hesap']['ad']} ({$o['hesap']['bayiKodu']}) — rol {$o['hesap']['rol']}\n";
+        echo "  UYARI: Telefonla aramada personel hesabı yalnız kendi kapsamındaki talepleri bulur; "
+           . "başka bayiye yönlendirilmiş talepler 'talep yok' görünebilir. Önerilen yöntem: rapor.\n\n";
 
         $sayac = ['eslesti' => 0, 'talep_yok' => 0, 'personel_eslesmedi' => 0,
                   'talep_kullanimda' => 0, 'telefon_eksik' => 0, 'hata' => 0, 'yazilan' => 0];
@@ -4477,7 +4510,7 @@ function gorevIrisTalepEslestir(array $params, $db): array
  * dolum ayrı bir iş değil, görevin doğal sonucudur.
  *
  * Parametreler:
- *   ana_bayi_id  : IRIS oturumunun açılacağı ana bayi (boşsa IrisTalepVarsayilan bayrağı)
+ *   personel_id  : IRIS oturumunun açılacağı personel (zorunlu)
  *   adet         : Bir turda işlenecek talep (vars. 300, en fazla 1000)
  *   pencere_gun  : Başvuru tarihi talep tarihinin kaç gün öncesi/sonrası olabilir (vars. 30)
  *   personeli_ez : 1 → dolu AltBayiPersonel_ID IRIS'teki kaydedenle ezilir
@@ -4502,9 +4535,9 @@ function gorevIrisTalepRapordanEslestir(array $params, $db): array
         $personeliEz = !empty($params['personeli_ez']);
         $kuru        = !empty($params['kuru']);
 
-        // ana_bayi_id verilmezse panelin varsayılan hesabı (IrisTalepVarsayilan bayrağı).
-        // Kuyruk bu hesabın bayi kodundaki taleplerle sınırlıdır.
-        $o        = irisTalepOturum($db, (int)($params['ana_bayi_id'] ?? 0) ?: null);
+        // Oturum zamanlayıcıda seçilen personelle açılır (zorunlu, gorevIrisTalepEslestir denetler).
+        // Kuyruk bu personelin bayi kodundaki taleplerle sınırlıdır.
+        $o        = irisTalepOturum($db, (int)$params['personel_id']);
         $bayiKodu = (string)$o['hesap']['bayiKodu'];
         echo "  IRIS oturumu: {$o['hesap']['ad']} ({$bayiKodu}) — rol {$o['hesap']['rol']}\n";
 

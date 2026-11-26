@@ -6,7 +6,7 @@
  * DigiturkAltBayiPersonel ile eşleştirir; ccapi CheckRequisitionList ile süreç
  * durumunu günceller.
  *
- * Kullanan: admin/pages/iris-talep-eslestirme.php, cron/tasks.php
+ * Kullanan: cron/tasks.php (iris_islemler: eslestir, surec), admin/pages/basvuru-form.php (süreç kontrol)
  *
  * IRIS web API (iris.digiturk.com.tr/api) — IrisWebToken + IrisVerificationToken
  *   Auth/GetToken → Auth/Login → Auth/GetToken
@@ -72,50 +72,44 @@ function irisMesaj(array $r): string
 }
 
 /**
- * IRIS talep sorgularında kullanılacak ana bayi hesabını verir.
+ * IRIS web oturumu açar → ['ch'=>, 'webToken'=>, 'verToken'=>, 'hesap'=>]
  *
- * $anaBayiId verilirse o ana bayi kullanılır (cron zamanlayıcısının ana_bayi_id
- * parametresi). Verilmezse DigiturkAnaBayiler_IrisTalepVarsayilan bayrağına bakılır;
- * bayrak sayfadaki "IRIS Sorgularında Kullanılan Hesap" kartından değiştirilir.
+ * Oturum her zaman zamanlayıcıda seçilen PERSONEL hesabıyla açılır. Ana bayi (DEALER)
+ * oturumu yalnız panel "IRIS Talep Eşleştirme" sayfası içindi; sayfa 25.11.2026'da
+ * kaldırıldı (telefon araması → Müşteri Arama, toplu eşleştirme/süreç → cron).
  */
-function irisTalepHesabi($db, ?int $anaBayiId = null): array
+function irisTalepOturum($db, int $personelId): array
 {
-    $alanlar = "SELECT DigiturkAnaBayiler_Id           AS id,
-                       DigiturkAnaBayiler_Ad           AS ad,
-                       DigiturkAnaBayiler_BayiKodu     AS bayiKodu,
-                       DigiturkAnaBayiler_KullaniciAdi AS kullanici,
-                       DigiturkAnaBayiler_Sifre        AS sifre
-                FROM DigiturkAnaBayiler";
-
-    if ($anaBayiId) {
-        $hesap = $db->fetchOne("{$alanlar} WHERE DigiturkAnaBayiler_Id = ? AND Durum = 1", [$anaBayiId]);
-        if (!$hesap) {
-            throw new RuntimeException("IRIS sorgu hesabı bulunamadı veya pasif (ana_bayi_id={$anaBayiId}).");
-        }
-    } else {
-        $hesap = $db->fetchOne("{$alanlar} WHERE DigiturkAnaBayiler_IrisTalepVarsayilan = 1 AND Durum = 1");
-        if (!$hesap) {
-            throw new RuntimeException('IRIS sorgu hesabı seçilmemiş — sayfadaki '
-                . '"IRIS Sorgularında Kullanılan Hesap" kartından bir ana bayi seçin.');
-        }
-    }
-    if (empty($hesap['kullanici']) || empty($hesap['sifre'])) {
-        throw new RuntimeException("IRIS sorgu hesabının kullanıcı adı/şifresi boş ({$hesap['ad']}).");
-    }
-    return $hesap;
+    return irisPersonelOturum($db, $personelId);
 }
 
 /**
- * IRIS web oturumu açar → ['ch'=>, 'webToken'=>, 'verToken'=>, 'hesap'=>]
+ * IRIS web oturumunu PERSONEL hesabıyla açar (Role=PERSONNEL) → irisTalepOturum ile aynı yapı.
  *
- * Oturum ANA BAYİ hesabıyla açılır (Role=DEALER). Personel hesabı (Role=PERSONNEL)
- * yalnız kendi kapsamındaki talepleri görüyor; başka bayiye yönlendirilmiş talepler
- * için SearchRequisition "Kayıt Bulunamadı.." döndüğünden hiçbir eşleştirme
- * yapılamıyordu (tespit: 16.09.2026).
+ * Personel, bağlı olduğu bayinin başka personellerinin girdiği taleplerin detayını
+ * (GetRequisitionDetail) görebiliyor (test: 25.11.2026); rapordan eşleştirme için yeterli.
+ * Telefonla aramada (SearchRequisition) kapsamı sınırlıdır.
+ *
+ * Kayıtlı web token (IRIS rapor cron'unun yazdığı) geçerliyse yeniden login atılmaz;
+ * login gerekirse yeni token aynı kolonlara yazılır, rapor cron'u da onu kullanabilir.
  */
-function irisTalepOturum($db, ?int $anaBayiId = null): array
+function irisPersonelOturum($db, int $personelId): array
 {
-    $hesap = irisTalepHesabi($db, $anaBayiId);
+    $p = $db->fetchOne("
+        SELECT p.DigiturkAltBayiPersonel_Id                AS id,
+               p.DigiturkAltBayiPersonel_AdSoyad           AS ad,
+               p.DigiturkAltBayiPersonel_KullaniciAdi      AS kullanici,
+               p.DigiturkAltBayiPersonel_Sifre             AS sifre,
+               p.DigiturkAltBayiPersonel_WebToken          AS webToken,
+               p.DigiturkAltBayiPersonel_WebTokenSuresi    AS webTokenSuresi,
+               p.DigiturkAltBayiPersonel_WebTokenDurum     AS webTokenDurum,
+               n.DigiturkAnaBayiler_BayiKodu               AS bayiKodu
+        FROM DigiturkAltBayiPersonel p
+        LEFT JOIN DigiturkAltBayiler a ON p.DigiturkAltBayiPersonel_AltBayiId = a.DigiturkAltBayiler_Id
+        LEFT JOIN DigiturkAnaBayiler n ON a.DigiturkAltBayiler_AnaBayiId      = n.DigiturkAnaBayiler_Id
+        WHERE p.DigiturkAltBayiPersonel_Id = ? AND p.Durum = 1", [$personelId]);
+    if (!$p) throw new RuntimeException("IRIS oturum personeli bulunamadı veya pasif (#{$personelId}).");
+    if (empty($p['bayiKodu'])) throw new RuntimeException("Personelin (#{$personelId}) bağlı olduğu bayi kodu bulunamadı.");
 
     $ch = curl_init();
     curl_setopt_array($ch, [
@@ -124,32 +118,53 @@ function irisTalepOturum($db, ?int $anaBayiId = null): array
         CURLOPT_TIMEOUT => 60, CURLOPT_ENCODING => '',
     ]);
 
+    $hesap = ['id' => (int)$p['id'], 'ad' => $p['ad'] . ' (personel)', 'bayiKodu' => $p['bayiKodu'],
+              'kullanici' => $p['kullanici'], 'rol' => 'PERSONNEL', 'personelId' => (int)$p['id']];
+
+    // 1) Kayıtlı token hâlâ geçerliyse kullan
+    if ((int)$p['webTokenDurum'] === 1 && !empty($p['webToken'])
+        && strtotime((string)$p['webTokenSuresi']) > time() + 600) {
+        $r = irisWebPost($ch, 'Auth/GetToken', new stdClass(), null, $p['webToken']);
+        if (!empty($r['token'])) {
+            return ['ch' => $ch, 'webToken' => $r['token'], 'verToken' => $p['webToken'], 'hesap' => $hesap];
+        }
+    }
+
+    // 2) Login
+    if (empty($p['kullanici']) || empty($p['sifre'])) {
+        throw new RuntimeException("Personelin (#{$personelId}) IRIS kullanıcı adı/şifresi boş.");
+    }
     $r = irisWebPost($ch, 'Auth/GetToken', new stdClass(), null, null);
     $webToken = $r['token'] ?? null;
     if (!$webToken) throw new RuntimeException('Auth/GetToken token vermedi.');
 
     try {
         $r = irisWebPost($ch, 'Auth/Login', [
-            'DealerCode' => $hesap['bayiKodu'], 'UserCode' => $hesap['kullanici'],
-            'Password'   => $hesap['sifre'],    'Language' => 'tr',
+            'DealerCode' => $p['bayiKodu'], 'UserCode' => $p['kullanici'],
+            'Password'   => $p['sifre'],    'Language' => 'tr',
         ], $webToken, null);
         $veri     = irisVeri($r);
         $verToken = $veri['Token'] ?? null;
         if (!$verToken) {
-            throw new RuntimeException("IRIS login başarısız ({$hesap['ad']}): " . (irisMesaj($r) ?: 'bilinmeyen hata'));
+            throw new RuntimeException("IRIS login başarısız ({$p['ad']}): " . (irisMesaj($r) ?: 'bilinmeyen hata'));
         }
     } catch (RuntimeException $e) {
         require_once __DIR__ . '/DigiturkKotaServisi.php';
-        loginSifreHatasiBildir($db, 'anabayi', (int)$hesap['id'], (string)$hesap['ad'], $e->getMessage(), 'IRIS Talep Eşleştirme');
+        loginSifreHatasiBildir($db, 'personel', (int)$p['id'], (string)$p['ad'], $e->getMessage(), 'IRIS Talep Eşleştirme');
         throw $e;
     }
 
     $r = irisWebPost($ch, 'Auth/GetToken', new stdClass(), $webToken, $verToken);
     $webToken = $r['token'] ?? $webToken;
+    $hesap['rol'] = $veri['Role'] ?? 'PERSONNEL';
 
-    // Token DB'ye YAZILMAZ: _WebToken kolonlarını IRIS rapor cron'u kullanıyor,
-    // buradan yazmak onun token'ını eziyordu. Oturum yalnız istek boyunca yaşar.
-    $hesap['rol'] = $veri['Role'] ?? null;
+    $db->update('DigiturkAltBayiPersonel', [
+        'DigiturkAltBayiPersonel_WebToken'       => $verToken,
+        'DigiturkAltBayiPersonel_WebTokenSuresi' => date('Y-m-d H:i:s', strtotime('+3 hours')),
+        'DigiturkAltBayiPersonel_WebTokenDurum'  => 1,
+        'GuncelleyenKullanici'                   => 1,
+        'GuncellemeTarihi'                       => date('Y-m-d H:i:s'),
+    ], ['DigiturkAltBayiPersonel_Id' => (int)$p['id']]);
 
     return ['ch' => $ch, 'webToken' => $webToken, 'verToken' => $verToken, 'hesap' => $hesap];
 }
@@ -251,14 +266,15 @@ function irisCcapiPost($db, int $endpointId, $body): array
  * gönderilmezse IIS "411 Length Required" döndüğü için boş gövde şarttır
  * (Content-Length: 0) — Content-Type gönderilmez.
  *
- * @param ?int $anaBayiId Token bu ana bayinin sorgu personelinden alınır (bkz. irisPersonelCoz)
+ * @param ?int $anaBayiId  Token bu ana bayinin sorgu personelinden alınır (bkz. irisPersonelCoz)
+ * @param ?int $personelId Verilirse doğrudan bu personelin token'ı kullanılır (cron zamanlayıcısı)
  */
-function irisCcapiGet($db, int $endpointId, array $parametreler, ?int $anaBayiId = null): array
+function irisCcapiGet($db, int $endpointId, array $parametreler, ?int $anaBayiId = null, ?int $personelId = null): array
 {
     $ep = $db->fetchOne("SELECT APIEndpointler_Endpoint, APIEndpointler_HttpMetod FROM APIEndpointler WHERE APIEndpointler_Id = ? AND Durum = 1", [$endpointId]);
     if (!$ep) throw new RuntimeException("API endpoint bulunamadı (Id={$endpointId})");
 
-    $personelId = irisPersonelCoz($db, $anaBayiId);
+    $personelId = $personelId ?: irisPersonelCoz($db, $anaBayiId);
     $tok   = $db->fetchOne("SELECT DigiturkAltBayiPersonel_Token AS token FROM DigiturkAltBayiPersonel WHERE DigiturkAltBayiPersonel_Id = ?", [$personelId]);
     $token = $tok['token'] ?? null;
     if (!$token) throw new RuntimeException("ccapi token yok (personel #{$personelId} — Token Güncelle görevini çalıştırın).");
@@ -585,8 +601,9 @@ function irisDurumSatirSec($data): ?array
  *
  * @param ?int $anaBayiId Sorgunun hangi bayinin hesabıyla yapılacağı (bkz. irisPersonelCoz)
  * @param int  $bekleMs   İstekler arası bekleme (ms). API'yi yormamak için.
+ * @param ?int $personelId Verilirse token doğrudan bu personelden alınır (irisPersonelCoz atlanır)
  */
-function irisDurumSorgula($db, array $talepNolar, ?int $anaBayiId = null, int $bekleMs = IRIS_CAGRI_BEKLEME): array
+function irisDurumSorgula($db, array $talepNolar, ?int $anaBayiId = null, int $bekleMs = IRIS_CAGRI_BEKLEME, ?int $personelId = null): array
 {
     $sonuc = [];
     $nolar = array_values(array_unique(array_filter(array_map('intval', $talepNolar))));
@@ -602,7 +619,7 @@ function irisDurumSorgula($db, array $talepNolar, ?int $anaBayiId = null, int $b
         $ilk = false;
 
         try {
-            $r = irisCcapiGet($db, IRIS_EP_DURUM, ['RequestId' => $no], $anaBayiId);
+            $r = irisCcapiGet($db, IRIS_EP_DURUM, ['RequestId' => $no], $anaBayiId, $personelId);
         } catch (Throwable $e) {
             $sonHata = $e->getMessage();
             if (++$ardisikHata >= 3) {
