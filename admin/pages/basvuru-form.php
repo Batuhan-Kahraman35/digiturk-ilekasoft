@@ -387,6 +387,134 @@ function basvuruBirimPersoneli($db, $basvuru): ?string {
 }
 
 // =====================================================================
+// İLETİŞİM GEÇMİŞİ (BasvuruIletisimGecmisi) — her temas ayrı kayıt, üzerine yazılmaz
+// =====================================================================
+/**
+ * Departmanın seçebildiği aktif iletişim durumları.
+ * Durum için BasvuruIletisimDurumDepartmanlari kaydı yoksa herkese açıktır; admin hepsini görür.
+ * $durumId verilirse yalnız o durumu döner (sunucu tarafı yetki kontrolü için).
+ */
+function iletisimDurumlariSecilebilir($db, int $departmanId, bool $admin, int $durumId = 0): array {
+    $params = [];
+    $sql = "SELECT d.BasvuruIletisimDurum_id AS id, d.BasvuruIletisimDurum_Mesaj AS ad,
+                   d.BasvuruIletisimDurum_Renk AS renk, CAST(d.BasvuruIletisimDurum_TarihSecilir AS INT) AS tarih
+            FROM BasvuruIletisimDurum d
+            WHERE d.Durum = 1";
+    if (!$admin) {
+        $sql .= " AND (NOT EXISTS (SELECT 1 FROM BasvuruIletisimDurumDepartmanlari x
+                                   WHERE x.BasvuruIletisimDurumDepartmanlari_IletisimDurum_id = d.BasvuruIletisimDurum_id AND x.Durum = 1)
+                    OR EXISTS (SELECT 1 FROM BasvuruIletisimDurumDepartmanlari x
+                               WHERE x.BasvuruIletisimDurumDepartmanlari_IletisimDurum_id = d.BasvuruIletisimDurum_id AND x.Durum = 1
+                                 AND x.BasvuruIletisimDurumDepartmanlari_Departman_id = ?))";
+        $params[] = $departmanId;
+    }
+    if ($durumId > 0) { $sql .= " AND d.BasvuruIletisimDurum_id = ?"; $params[] = $durumId; }
+    return $db->fetchAll($sql . " ORDER BY d.BasvuruIletisimDurum_Mesaj", $params);
+}
+
+/** datetime-local değeri (Y-m-d\TH:i) → 'Y-m-d H:i:s'; geçersizse null */
+function iletisimRandevuTarihi(string $deger): ?string {
+    $dt = DateTime::createFromFormat('Y-m-d\TH:i', trim($deger));
+    return ($dt && $dt->format('Y-m-d\TH:i') === trim($deger)) ? $dt->format('Y-m-d H:i:00') : null;
+}
+
+/**
+ * İletişim geçmişi satırları. 'duzenle' = bu kullanıcı kaydı düzenleyebilir mi:
+ * admin her zaman; diğerleri yalnız kaydın durumunun "Değiştirebilen Departmanlar"
+ * listesinde (BasvuruIletisimDurumDegistirenDepartmanlari) departmanı varsa ya da durumda "Kendisi"
+ * (BasvuruIletisimDurum_KendisiDegistirir) açıksa ve kaydı bu kullanıcı yazdıysa. Liste boşsa yalnız admin.
+ * $gecmisId verilirse yalnız o kayıt döner (sunucu tarafı yetki kontrolü için).
+ */
+function iletisimGecmisiGetir($db, int $basvuruId, int $departmanId = 0, bool $admin = false, int $kullaniciId = 0, int $gecmisId = 0): array {
+    if ($basvuruId <= 0) return [];
+    $params = [$admin ? 1 : 0, $kullaniciId, $departmanId, $basvuruId];
+    $ek = '';
+    if ($gecmisId > 0) { $ek = ' AND g.BasvuruIletisimGecmisi_id = ?'; $params[] = $gecmisId; }
+    return $db->fetchAll("
+        SELECT g.BasvuruIletisimGecmisi_id AS id,
+               g.BasvuruIletisimGecmisi_IletisimDurum_ID AS durum_id,
+               g.BasvuruIletisimGecmisi_Not AS notu,
+               d.BasvuruIletisimDurum_Mesaj AS durum,
+               d.BasvuruIletisimDurum_Renk AS renk,
+               CAST(ISNULL(d.BasvuruIletisimDurum_TarihSecilir, 0) AS INT) AS durum_tarih,
+               CASE WHEN g.BasvuruIletisimGecmisi_RandevuTarihi IS NULL THEN NULL ELSE
+                    CONVERT(VARCHAR(10), g.BasvuruIletisimGecmisi_RandevuTarihi, 104) + ' ' + CONVERT(VARCHAR(5), g.BasvuruIletisimGecmisi_RandevuTarihi, 108) END AS randevu,
+               LEFT(CONVERT(VARCHAR(19), g.BasvuruIletisimGecmisi_RandevuTarihi, 126), 16) AS randevu_ham,
+               CONVERT(VARCHAR(10), g.OlusturmaTarihi, 104) + ' ' + CONVERT(VARCHAR(5), g.OlusturmaTarihi, 108) AS tarih,
+               LTRIM(RTRIM(CONCAT(k.kullanici_ad, ' ', k.kullanici_soyad))) AS kullanici,
+               CASE WHEN g.GuncellemeTarihi IS NULL THEN NULL ELSE
+                    CONVERT(VARCHAR(10), g.GuncellemeTarihi, 104) + ' ' + CONVERT(VARCHAR(5), g.GuncellemeTarihi, 108) END AS duzenleme_tarih,
+               LTRIM(RTRIM(CONCAT(gk.kullanici_ad, ' ', gk.kullanici_soyad))) AS duzenleyen,
+               CASE WHEN ? = 1 THEN 1
+                    WHEN d.BasvuruIletisimDurum_KendisiDegistirir = 1 AND g.OlusturanKullanici = ? THEN 1
+                    WHEN EXISTS (SELECT 1 FROM BasvuruIletisimDurumDegistirenDepartmanlari x
+                                 WHERE x.BasvuruIletisimDurumDegistirenDepartmanlari_IletisimDurum_id = g.BasvuruIletisimGecmisi_IletisimDurum_ID
+                                   AND x.BasvuruIletisimDurumDegistirenDepartmanlari_Departman_id = ? AND x.Durum = 1) THEN 1
+                    ELSE 0 END AS duzenle
+        FROM BasvuruIletisimGecmisi g
+        LEFT JOIN BasvuruIletisimDurum d ON d.BasvuruIletisimDurum_id = g.BasvuruIletisimGecmisi_IletisimDurum_ID
+        LEFT JOIN kullanicilar k         ON k.kullanici_id = g.OlusturanKullanici
+        LEFT JOIN kullanicilar gk        ON gk.kullanici_id = g.GuncelleyenKullanici
+        WHERE g.BasvuruIletisimGecmisi_Basvuru_id = ? AND g.Durum = 1$ek
+        ORDER BY g.OlusturmaTarihi DESC, g.BasvuruIletisimGecmisi_id DESC
+    ", $params);
+}
+
+function iletisimGecmisiHtml(array $rows): string {
+    if (!$rows) return '<div class="text-muted small py-2">Henüz iletişim kaydı yok.</div>';
+    $e = fn($v) => htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8');
+    $h = '<ul class="list-group list-group-flush">';
+    foreach ($rows as $r) {
+        $duzenleBtn = (int)$r['duzenle'] === 1
+            ? ' <button type="button" class="btn btn-link btn-sm p-0 ms-1 ig-duzenle" title="Düzenle"'
+              . ' data-id="' . (int)$r['id'] . '" data-durum="' . (int)$r['durum_id'] . '"'
+              . ' data-durum-ad="' . $e($r['durum']) . '" data-durum-tarih="' . (int)$r['durum_tarih'] . '"'
+              . ' data-randevu="' . $e($r['randevu_ham']) . '"'
+              . ' data-not="' . $e($r['notu']) . '"><i class="bi bi-pencil-square"></i></button>'
+            : '';
+        $h .= '<li class="list-group-item px-0 py-2">'
+            . '<div class="d-flex justify-content-between align-items-start gap-2">'
+            . '<div>'
+            . ($r['durum'] ? (preg_match('/^#[0-9A-Fa-f]{6}$/', (string)($r['renk'] ?? ''))
+                    ? '<span class="badge" style="background:' . $r['renk'] . '">' . $e($r['durum']) . '</span>'
+                    : '<span class="badge bg-primary">' . $e($r['durum']) . '</span>') : '')
+            . (!empty($r['randevu']) ? ' <span class="badge bg-warning text-dark"><i class="bi bi-calendar-event"></i> ' . $e($r['randevu']) . '</span>' : '')
+            . '</div>'
+            . '<small class="text-muted text-nowrap"><i class="bi bi-person"></i> ' . $e($r['kullanici'] ?: '—')
+            . ' · <i class="bi bi-clock"></i> ' . $e($r['tarih']) . $duzenleBtn . '</small>'
+            . '</div>'
+            . ($r['notu'] !== null && $r['notu'] !== '' ? '<div class="mt-1" style="white-space:pre-line">' . $e($r['notu']) . '</div>' : '')
+            . (!empty($r['duzenleme_tarih'])
+                ? '<div class="small text-muted fst-italic mt-1"><i class="bi bi-pencil"></i> Düzenlendi: ' . $e($r['duzenleyen'] ?: '—') . ' · ' . $e($r['duzenleme_tarih']) . '</div>'
+                : '')
+            . '</li>';
+    }
+    return $h . '</ul>';
+}
+
+/**
+ * Başvurunun son iletişim durumunu geçmişteki en yeni durumlu kayda eşitler (düzenleme sonrası).
+ * Değişiklik varsa Basvurular güncellenir ve BasvuruLog'a yazılır.
+ */
+function iletisimSonDurumEsitle($db, int $basvuruId, int $kullaniciId): void {
+    $son = $db->fetchOne("
+        SELECT TOP 1 BasvuruIletisimGecmisi_IletisimDurum_ID AS durum_id FROM BasvuruIletisimGecmisi
+        WHERE BasvuruIletisimGecmisi_Basvuru_id = ? AND Durum = 1 AND BasvuruIletisimGecmisi_IletisimDurum_ID IS NOT NULL
+        ORDER BY OlusturmaTarihi DESC, BasvuruIletisimGecmisi_id DESC
+    ", [$basvuruId]);
+    $yeni = $son ? (int)$son['durum_id'] : null;
+    $oncesi = $db->fetchOne("SELECT * FROM Basvurular WHERE Basvurular_id = ?", [$basvuruId]);
+    if (!$oncesi || (isset($oncesi['Basvurular_IletisimDurum_ID']) ? (int)$oncesi['Basvurular_IletisimDurum_ID'] : null) === $yeni) return;
+    $db->update('Basvurular', [
+        'Basvurular_IletisimDurum_ID' => $yeni,
+        'GuncelleyenKullanici'        => $kullaniciId,
+        'GuncellemeTarihi'            => date('Y-m-d H:i:s'),
+    ], ['Basvurular_id' => $basvuruId]);
+    $sonrasi = $db->fetchOne("SELECT * FROM Basvurular WHERE Basvurular_id = ?", [$basvuruId]);
+    basvuruLogKaydet($db, $basvuruId, 'GUNCELLE', $oncesi, $sonrasi, $kullaniciId, 'İletişim geçmişi kaydı düzenlendi');
+}
+
+// =====================================================================
 // AJAX İŞLEMLERİ (kaydet + BBK adres proxy + şehre göre kampanya)
 // =====================================================================
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -628,6 +756,124 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             exit;
         }
 
+        // İletişim geçmişine kayıt ekle (durum ve/veya not). Durum seçildiyse ana kayıttaki son durum da güncellenir.
+        if ($action === 'iletisim_ekle') {
+            $kayitId = (int)($_POST['id'] ?? 0);
+            if ($kayitId <= 0) throw new Exception('İletişim kaydı yalnız kayıtlı başvuruya eklenir.');
+            if (!$permissions['can_edit']) throw new Exception('Düzenleme yetkiniz yok!');
+            if (($birimKisitli && !basvuruKayitBirimYetkiliMi($db, $izinliBirimler, $kayitId))
+                || ($kendiKisitli && !basvuruKayitKendiMi($db, $kullaniciId, $kayitId))) {
+                throw new Exception('Bu kayda erişim yetkiniz yok!');
+            }
+
+            // Alan yetkisi: durum → Basvurular_IletisimDurum_ID, not → Basvuru_Aciklama
+            $durumId = $alanDuzenle('Basvurular_IletisimDurum_ID') ? (int)($_POST['durum_id'] ?? 0) : 0;
+            $notu    = $alanDuzenle('Basvuru_Aciklama') ? trim((string)($_POST['not'] ?? '')) : '';
+            if ($durumId <= 0 && $notu === '') throw new Exception('İletişim durumu seçin veya not yazın.');
+            if (mb_strlen($notu) > 1000) throw new Exception('Not en fazla 1000 karakter olabilir.');
+            // Departman yetkisi + tarih/saat zorunluluğu (durum tanımındaki bayrak)
+            $randevu = null;
+            if ($durumId > 0) {
+                $durumSatir = iletisimDurumlariSecilebilir($db, (int)($user['departman_id'] ?? 0), $alanAdmin, $durumId)[0] ?? null;
+                if (!$durumSatir) throw new Exception('Bu iletişim durumunu seçme yetkiniz yok.');
+                if ((int)$durumSatir['tarih'] === 1) {
+                    $randevu = iletisimRandevuTarihi((string)($_POST['randevu'] ?? ''));
+                    if ($randevu === null) throw new Exception('"' . $durumSatir['ad'] . '" için tarih ve saat seçmelisiniz.');
+                }
+            }
+
+            $simdi = date('Y-m-d H:i:s');
+            $db->insert('BasvuruIletisimGecmisi', [
+                'BasvuruIletisimGecmisi_Basvuru_id'       => $kayitId,
+                'BasvuruIletisimGecmisi_IletisimDurum_ID' => $durumId > 0 ? $durumId : null,
+                'BasvuruIletisimGecmisi_Not'              => $notu !== '' ? $notu : null,
+                'BasvuruIletisimGecmisi_RandevuTarihi'    => $randevu,
+                'OlusturanKullanici'                      => $user['kullanici_id'],
+                'OlusturmaTarihi'                         => $simdi,
+                'Durum'                                   => 1,
+            ]);
+
+            if ($durumId > 0) {
+                $logOncesi = $db->fetchOne("SELECT * FROM Basvurular WHERE Basvurular_id = ?", [$kayitId]);
+                $db->update('Basvurular', [
+                    'Basvurular_IletisimDurum_ID' => $durumId,
+                    'GuncelleyenKullanici'        => $user['kullanici_id'],
+                    'GuncellemeTarihi'            => $simdi,
+                ], ['Basvurular_id' => $kayitId]);
+                $logSonrasi = $db->fetchOne("SELECT * FROM Basvurular WHERE Basvurular_id = ?", [$kayitId]);
+                basvuruLogKaydet($db, $kayitId, 'GUNCELLE', $logOncesi, $logSonrasi, $user['kullanici_id'], 'İletişim geçmişine kayıt eklendi');
+            }
+
+            echo json_encode([
+                'success' => true,
+                'message' => 'İletişim kaydı eklendi',
+                'html'    => iletisimGecmisiHtml(iletisimGecmisiGetir($db, $kayitId, (int)($user['departman_id'] ?? 0), $alanAdmin, (int)$user['kullanici_id'])),
+            ]);
+            exit;
+        }
+
+        // İletişim geçmişindeki mevcut kaydı düzenle (durum + not + randevu).
+        // Yetki: admin veya kaydın durumunun "Değiştirebilen Departmanlar" listesindeki departman.
+        if ($action === 'iletisim_duzenle') {
+            $kayitId  = (int)($_POST['id'] ?? 0);
+            $gecmisId = (int)($_POST['gecmis_id'] ?? 0);
+            if ($kayitId <= 0 || $gecmisId <= 0) throw new Exception('Geçersiz kayıt.');
+            if (!$permissions['can_edit']) throw new Exception('Düzenleme yetkiniz yok!');
+            if (($birimKisitli && !basvuruKayitBirimYetkiliMi($db, $izinliBirimler, $kayitId))
+                || ($kendiKisitli && !basvuruKayitKendiMi($db, $kullaniciId, $kayitId))) {
+                throw new Exception('Bu kayda erişim yetkiniz yok!');
+            }
+
+            $depId = (int)($user['departman_id'] ?? 0);
+            $eski  = iletisimGecmisiGetir($db, $kayitId, $depId, $alanAdmin, (int)$user['kullanici_id'], $gecmisId)[0] ?? null;
+            if (!$eski) throw new Exception('İletişim kaydı bulunamadı.');
+            if ((int)$eski['duzenle'] !== 1) throw new Exception('Bu kaydı düzenleme yetkiniz yok.');
+
+            // Alan yetkisi yoksa eski değer korunur
+            $durumId = $alanDuzenle('Basvurular_IletisimDurum_ID') ? (int)($_POST['durum_id'] ?? 0) : (int)$eski['durum_id'];
+            $notu    = $alanDuzenle('Basvuru_Aciklama') ? trim((string)($_POST['not'] ?? '')) : (string)($eski['notu'] ?? '');
+            if ($durumId <= 0 && $notu === '') throw new Exception('İletişim durumu seçin veya not yazın.');
+            if (mb_strlen($notu) > 1000) throw new Exception('Not en fazla 1000 karakter olabilir.');
+
+            $randevu = null;
+            if ($durumId > 0) {
+                // Durum değiştiyse yeni durum departmanın seçebildikleri arasında olmalı; aynı kaldıysa kontrol edilmez
+                if ($durumId !== (int)$eski['durum_id']
+                    && !iletisimDurumlariSecilebilir($db, $depId, $alanAdmin, $durumId)) {
+                    throw new Exception('Bu iletişim durumunu seçme yetkiniz yok.');
+                }
+                $dt = $db->fetchOne("SELECT BasvuruIletisimDurum_Mesaj AS ad, CAST(BasvuruIletisimDurum_TarihSecilir AS INT) AS tarih
+                                     FROM BasvuruIletisimDurum WHERE BasvuruIletisimDurum_id = ?", [$durumId]);
+                if (!$dt) throw new Exception('Geçersiz iletişim durumu.');
+                if ((int)$dt['tarih'] === 1) {
+                    $randevu = iletisimRandevuTarihi((string)($_POST['randevu'] ?? ''));
+                    if ($randevu === null) throw new Exception('"' . $dt['ad'] . '" için tarih ve saat seçmelisiniz.');
+                }
+            }
+
+            $db->update('BasvuruIletisimGecmisi', [
+                'BasvuruIletisimGecmisi_IletisimDurum_ID' => $durumId > 0 ? $durumId : null,
+                'BasvuruIletisimGecmisi_Not'              => $notu !== '' ? $notu : null,
+                'BasvuruIletisimGecmisi_RandevuTarihi'    => $randevu,
+                'GuncelleyenKullanici'                    => $user['kullanici_id'],
+                'GuncellemeTarihi'                        => date('Y-m-d H:i:s'),
+            ], ['BasvuruIletisimGecmisi_id' => $gecmisId]);
+
+            // Düzenlenen kayıt en yeni durumlu kayıtsa başvurunun son durumu da değişir
+            iletisimSonDurumEsitle($db, $kayitId, (int)$user['kullanici_id']);
+            $sonAd = $db->fetchOne("SELECT d.BasvuruIletisimDurum_Mesaj AS ad FROM Basvurular b
+                                    LEFT JOIN BasvuruIletisimDurum d ON d.BasvuruIletisimDurum_id = b.Basvurular_IletisimDurum_ID
+                                    WHERE b.Basvurular_id = ?", [$kayitId])['ad'] ?? null;
+
+            echo json_encode([
+                'success'  => true,
+                'message'  => 'İletişim kaydı güncellendi',
+                'html'     => iletisimGecmisiHtml(iletisimGecmisiGetir($db, $kayitId, $depId, $alanAdmin, (int)$user['kullanici_id'])),
+                'sonDurum' => $sonAd,
+            ]);
+            exit;
+        }
+
         if ($action !== 'kaydet') {
             throw new Exception('Geçersiz işlem');
         }
@@ -678,6 +924,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         // Alan yetkisi: görünmeyen / düzenlenemeyen (departman veya süreç kilidi) alanlar yok sayılır → kayıttaki değer korunur
         foreach (array_keys($data) as $alanKod) {
             if (!$alanDuzenle($alanKod)) unset($data[$alanKod]);
+        }
+        // Düzenlemede açıklama salt okunur (ilk bilgi); iletişim durumu yalnız İletişim Geçmişi'nden değişir
+        $yeniRandevu = null;
+        if ($kayitId > 0) {
+            unset($data['Basvuru_Aciklama'], $data['Basvurular_IletisimDurum_ID']);
+        } elseif (!empty($data['Basvurular_IletisimDurum_ID'])) {
+            // Yeni kayıtta da departman yetkisi + tarih/saat zorunluluğu
+            $durumSatir = iletisimDurumlariSecilebilir($db, (int)($user['departman_id'] ?? 0), $alanAdmin, (int)$data['Basvurular_IletisimDurum_ID'])[0] ?? null;
+            if (!$durumSatir) throw new Exception('Bu iletişim durumunu seçme yetkiniz yok.');
+            if ((int)$durumSatir['tarih'] === 1) {
+                $yeniRandevu = iletisimRandevuTarihi((string)($_POST['IletisimRandevuTarihi'] ?? ''));
+                if ($yeniRandevu === null) throw new Exception('"' . $durumSatir['ad'] . '" için tarih ve saat seçmelisiniz.');
+            }
         }
 
         // TC Kimlik No: doluysa 11 haneli sayı olmalı (JS filtresi atlanırsa diye sunucuda da kontrol)
@@ -771,6 +1030,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             // LOG: yeni eklenen tam kayıt
             $logSonrasi = $yeniId ? $db->fetchOne("SELECT * FROM Basvurular WHERE Basvurular_id = ?", [(int)$yeniId]) : $data;
             basvuruLogKaydet($db, (int)$yeniId, 'EKLE', null, $logSonrasi, $user['kullanici_id'], 'Başvuru formdan eklendi');
+
+            // Yeni kayıtta iletişim durumu seçildiyse geçmişin ilk kaydı olarak da yazılır
+            if ($yeniId && !empty($data['Basvurular_IletisimDurum_ID'])) {
+                $db->insert('BasvuruIletisimGecmisi', [
+                    'BasvuruIletisimGecmisi_Basvuru_id'       => (int)$yeniId,
+                    'BasvuruIletisimGecmisi_IletisimDurum_ID' => (int)$data['Basvurular_IletisimDurum_ID'],
+                    'BasvuruIletisimGecmisi_RandevuTarihi'    => $yeniRandevu,
+                    'OlusturanKullanici'                      => $user['kullanici_id'],
+                    'OlusturmaTarihi'                         => $data['OlusturmaTarihi'],
+                    'Durum'                                   => 1,
+                ]);
+            }
 
             echo json_encode(['success' => (bool)$yeniId, 'message' => 'Başvuru eklendi', 'redirect' => '/Admin/basvuru-yonetimi']);
         }
@@ -871,7 +1142,13 @@ $kampanyalar = kampanyaListesi(
 );
 $basvuruDurumlari = $db->fetchAll("SELECT BasvuruDurum_id AS id, BasvuruDurum_Mesaj AS ad FROM BasvuruDurum ORDER BY BasvuruDurum_Mesaj");
 $surecDurumlari   = $db->fetchAll("SELECT BasvuruSurecDurum_id AS id, BasvuruSurecDurum_Mesaj AS ad FROM BasvuruSurecDurum ORDER BY BasvuruSurecDurum_Mesaj");
-$iletisimDurumlari = $db->fetchAll("SELECT BasvuruIletisimDurum_id AS id, BasvuruIletisimDurum_Mesaj AS ad FROM BasvuruIletisimDurum WHERE Durum = 1 ORDER BY BasvuruIletisimDurum_Mesaj");
+// İletişim durumları — yalnız kullanıcının departmanının seçebildikleri (departman tanımı yoksa herkes, admin hepsi)
+$iletisimDurumlari = iletisimDurumlariSecilebilir($db, (int)($user['departman_id'] ?? 0), $alanAdmin);
+$igSonDurum = '';
+if ($editMode && val($basvuru, 'Basvurular_IletisimDurum_ID') !== '') {
+    $igSonDurum = (string)($db->fetchOne("SELECT BasvuruIletisimDurum_Mesaj AS ad FROM BasvuruIletisimDurum WHERE BasvuruIletisimDurum_id = ?",
+        [(int)val($basvuru, 'Basvurular_IletisimDurum_ID')])['ad'] ?? '');
+}
 
 // Personel ve ApiLead — kısıtlı kullanıcı için KullaniciBirimYetkileri ile filtreli
 $kbyTarih = "kby.Durum = 1
@@ -1164,6 +1441,54 @@ $yetkiDepartmanlar = $alanAdmin
                                 </div>
                                 <?php endif; ?>
 
+                                <?php if ($editMode): ?>
+                                <?php if ($alanGor('Basvuru_Aciklama')): ?>
+                                <div class="col-12">
+                                    <label class="form-label">Açıklama <small class="text-muted">(ilk gelen bilgi — değiştirilemez, notlar İletişim Geçmişi'ne eklenir)</small></label>
+                                    <textarea class="form-control bg-light" rows="2" readonly><?= htmlspecialchars(val($basvuru, 'Basvuru_Aciklama')) ?></textarea>
+                                </div>
+                                <?php endif; ?>
+                                <?php if ($alanGor('Basvurular_IletisimDurum_ID') || $alanGor('Basvuru_Aciklama')):
+                                    $igDurumYetki = $alanGor('Basvurular_IletisimDurum_ID') && $alanDuzenle('Basvurular_IletisimDurum_ID');
+                                    $igNotYetki   = $alanGor('Basvuru_Aciklama') && $alanDuzenle('Basvuru_Aciklama');
+                                ?>
+                                <div class="col-12">
+                                    <label class="form-label mb-1"><i class="bi bi-clock-history"></i> İletişim Geçmişi</label>
+                                    <?php if ($igDurumYetki || $igNotYetki): ?>
+                                    <div class="row g-2 align-items-start mb-2">
+                                        <?php if ($igDurumYetki): ?>
+                                        <div class="col-md-3">
+                                            <!-- name yok: ana form kaydına gitmez, yalnız iletisim_ekle ile gönderilir -->
+                                            <select class="form-select" id="igDurum">
+                                                <option value="">— Durum değişmedi —</option>
+                                                <?php foreach ($iletisimDurumlari as $idr): ?>
+                                                <option value="<?= (int)$idr['id'] ?>" data-tarih="<?= (int)$idr['tarih'] ?>"><?= htmlspecialchars($idr['ad']) ?></option>
+                                                <?php endforeach; ?>
+                                            </select>
+                                        </div>
+                                        <div class="col-md-3 d-none" id="igRandevuKutu">
+                                            <input type="datetime-local" class="form-control" id="igRandevu" title="Randevu tarihi ve saati">
+                                        </div>
+                                        <?php endif; ?>
+                                        <?php if ($igNotYetki): ?>
+                                        <div class="col" id="igNotKutu">
+                                            <textarea class="form-control" id="igNot" rows="1" maxlength="1000" placeholder="Not (ör. arandı, akşam tekrar aranacak)"></textarea>
+                                        </div>
+                                        <?php endif; ?>
+                                        <div class="col-md-2 d-grid">
+                                            <button type="button" class="btn btn-outline-primary" id="btnIletisimEkle"><i class="bi bi-plus-lg"></i> Ekle</button>
+                                        </div>
+                                    </div>
+                                    <?php endif; ?>
+                                    <?php if ($alanGor('Basvurular_IletisimDurum_ID')): ?>
+                                    <div class="small mb-1">Son durum: <span class="badge bg-secondary" id="igSonDurum"><?= $igSonDurum !== '' ? htmlspecialchars($igSonDurum) : '—' ?></span></div>
+                                    <?php endif; ?>
+                                    <div id="iletisimGecmisi" class="border rounded px-2" style="max-height:320px;overflow-y:auto">
+                                        <?= iletisimGecmisiHtml(iletisimGecmisiGetir($db, $id, (int)($user['departman_id'] ?? 0), $alanAdmin, (int)$user['kullanici_id'])) ?>
+                                    </div>
+                                </div>
+                                <?php endif; ?>
+                                <?php else: ?>
                                 <?php if ($alanGor('Basvuru_Aciklama')): ?>
                                 <div class="col-md-9">
                                     <label class="form-label">Açıklama<?= $alanIco('Basvuru_Aciklama') ?></label>
@@ -1173,14 +1498,19 @@ $yetkiDepartmanlar = $alanAdmin
                                 <?php if ($alanGor('Basvurular_IletisimDurum_ID')): ?>
                                 <div class="col-md-3">
                                     <label class="form-label">İletişim Durumu<?= $alanIco('Basvurular_IletisimDurum_ID') ?></label>
-                                    <select class="form-select" name="Basvurular_IletisimDurum_ID" <?= $alanRo('Basvurular_IletisimDurum_ID') ?>>
+                                    <select class="form-select" name="Basvurular_IletisimDurum_ID" id="yeniIletisimDurum" <?= $alanRo('Basvurular_IletisimDurum_ID') ?>>
                                         <option value="">Seçiniz</option>
                                         <?php foreach ($iletisimDurumlari as $idr): ?>
-                                        <option value="<?= (int)$idr['id'] ?>" <?= (string)val($basvuru, 'Basvurular_IletisimDurum_ID') === (string)$idr['id'] ? 'selected' : '' ?>><?= htmlspecialchars($idr['ad']) ?></option>
+                                        <option value="<?= (int)$idr['id'] ?>" data-tarih="<?= (int)$idr['tarih'] ?>"><?= htmlspecialchars($idr['ad']) ?></option>
                                         <?php endforeach; ?>
                                     </select>
                                 </div>
+                                <div class="col-md-3 offset-md-9 d-none" id="yeniRandevuKutu">
+                                    <label class="form-label">Randevu Tarihi <span class="text-danger">*</span></label>
+                                    <input type="datetime-local" class="form-control" name="IletisimRandevuTarihi" id="yeniRandevu">
+                                </div>
                                 <?php endif; ?>
+                                <?php endif; /* editMode */ ?>
                             </div>
                         </div>
                     </div>
@@ -1299,6 +1629,44 @@ $yetkiDepartmanlar = $alanAdmin
 
     <?php include __DIR__ . '/../includes/footer.php'; ?>
 </div>
+
+<?php if ($editMode): ?>
+<!-- İletişim geçmişi kaydı düzenleme -->
+<div class="modal fade" id="igDuzenleModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="bi bi-pencil-square"></i> İletişim Kaydını Düzenle</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="igdId">
+                <div class="mb-3" <?= $alanDuzenle('Basvurular_IletisimDurum_ID') ? '' : 'hidden' ?>>
+                    <label class="form-label">İletişim Durumu</label>
+                    <select class="form-select" id="igdDurum">
+                        <option value="">— Durum yok —</option>
+                        <?php foreach ($iletisimDurumlari as $idr): ?>
+                        <option value="<?= (int)$idr['id'] ?>" data-tarih="<?= (int)$idr['tarih'] ?>"><?= htmlspecialchars($idr['ad']) ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <div class="mb-3 d-none" id="igdRandevuKutu">
+                    <label class="form-label">Randevu Tarihi <span class="text-danger">*</span></label>
+                    <input type="datetime-local" class="form-control" id="igdRandevu">
+                </div>
+                <div <?= $alanDuzenle('Basvuru_Aciklama') ? '' : 'hidden' ?>>
+                    <label class="form-label">Not</label>
+                    <textarea class="form-control" id="igdNot" rows="3" maxlength="1000"></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal"><i class="bi bi-x-circle"></i> İptal</button>
+                <button type="button" class="btn btn-primary" id="btnIgdKaydet"><i class="bi bi-save"></i> Kaydet</button>
+            </div>
+        </div>
+    </div>
+</div>
+<?php endif; ?>
 
 <?php if ($alanAdmin): ?>
 <!-- Sayfa Yetki Modal — departman bazlı alan görünürlük / düzenleme -->
@@ -1464,6 +1832,89 @@ $yetkiDepartmanlar = $alanAdmin
             }, 'json').fail(function () { showError('Bağlantı Hatası', 'Süreç sorgusu yapılamadı'); })
               .always(function () { $b.prop('disabled', false).html(eski); });
         });
+
+        // İletişim Geçmişi — kayıt ekle (ana form kaydından bağımsız)
+        // Durum tanımında "tarih/saat seçilir" işaretliyse (ör. Randevu) tarih alanı açılır ve zorunlu olur
+        function tarihGerekli($sel) { return String($sel.find('option:selected').data('tarih')) === '1'; }
+        $('#igDurum').on('change', function () {
+            const gerekli = tarihGerekli($(this));
+            $('#igRandevuKutu').toggleClass('d-none', !gerekli);
+            if (!gerekli) $('#igRandevu').val('');
+        });
+        $('#yeniIletisimDurum').on('change', function () {
+            const gerekli = tarihGerekli($(this));
+            $('#yeniRandevuKutu').toggleClass('d-none', !gerekli);
+            $('#yeniRandevu').prop('required', gerekli);
+            if (!gerekli) $('#yeniRandevu').val('');
+        });
+
+        $('#btnIletisimEkle').on('click', function () {
+            const durumId = $('#igDurum').val() || '';
+            const notu    = ($('#igNot').val() || '').trim();
+            const randevu = $('#igRandevu').val() || '';
+            if (!durumId && !notu) { showToast('İletişim durumu seçin veya not yazın', 'warning'); return; }
+            if (durumId && tarihGerekli($('#igDurum')) && !randevu) { showToast('Bu durum için tarih ve saat seçin', 'warning'); $('#igRandevu').trigger('focus'); return; }
+            const $b = $(this); const eski = $b.html();
+            $b.prop('disabled', true).html('<span class="spinner-border spinner-border-sm"></span>');
+            $.post('', { action: 'iletisim_ekle', id: <?= (int)$id ?>, durum_id: durumId, not: notu, randevu: randevu }, function (r) {
+                if (!r.success) { showError('Hata!', r.message || 'Bilinmeyen hata'); return; }
+                $('#iletisimGecmisi').html(r.html).scrollTop(0);
+                if (durumId) $('#igSonDurum').text($('#igDurum option:selected').text());
+                $('#igDurum').val('').trigger('change');
+                $('#igNot').val('');
+                showToast(r.message, 'success');
+            }, 'json').fail(function () { showError('Bağlantı Hatası', 'İletişim kaydı eklenemedi'); })
+              .always(function () { $b.prop('disabled', false).html(eski); });
+        });
+
+        // İletişim geçmişi kaydını düzenle (kalem ikonu yalnız yetkili kullanıcıya gelir; sunucu da kontrol eder)
+        const $igdModal = $('#igDuzenleModal');
+        if ($igdModal.length) {
+            const igdModal = new bootstrap.Modal($igdModal[0]);
+            // Modal içi select: custom.js init'i dropdownParent veremez → destroy + yeniden kur
+            if ($('#igdDurum').hasClass('select2-hidden-accessible')) $('#igdDurum').select2('destroy');
+            $('#igdDurum').select2({ theme: 'bootstrap-5', width: '100%', dropdownParent: $igdModal });
+
+            $('#igdDurum').on('change', function () {
+                const gerekli = tarihGerekli($(this));
+                $('#igdRandevuKutu').toggleClass('d-none', !gerekli);
+                if (!gerekli) $('#igdRandevu').val('');
+            });
+
+            $(document).on('click', '.ig-duzenle', function () {
+                const $b = $(this);
+                const durum = String($b.data('durum') || '');
+                // Kaydın durumu kullanıcının seçebildikleri arasında yoksa (yalnız düzenleme yetkisi) seçenek olarak eklenir
+                $('#igdDurum option[data-ek="1"]').remove();
+                if (durum && durum !== '0' && !$('#igdDurum option[value="' + durum + '"]').length) {
+                    $('#igdDurum').append($('<option>', { value: durum, text: $b.data('durumAd'), 'data-tarih': $b.data('durumTarih'), 'data-ek': '1' }));
+                }
+                $('#igdId').val($b.data('id'));
+                $('#igdDurum').val(durum !== '0' ? durum : '').trigger('change');
+                $('#igdRandevu').val($b.data('randevu') || '');
+                $('#igdNot').val($b.attr('data-not') || '');
+                igdModal.show();
+            });
+
+            $('#btnIgdKaydet').on('click', function () {
+                const durumId = $('#igdDurum').val() || '';
+                const notu    = ($('#igdNot').val() || '').trim();
+                const randevu = $('#igdRandevu').val() || '';
+                if (!durumId && !notu) { showToast('İletişim durumu seçin veya not yazın', 'warning'); return; }
+                if (durumId && tarihGerekli($('#igdDurum')) && !randevu) { showToast('Bu durum için tarih ve saat seçin', 'warning'); return; }
+                const $b = $(this); const eski = $b.html();
+                $b.prop('disabled', true).html('<span class="spinner-border spinner-border-sm"></span>');
+                $.post('', { action: 'iletisim_duzenle', id: <?= (int)$id ?>, gecmis_id: $('#igdId').val(),
+                             durum_id: durumId, not: notu, randevu: randevu }, function (r) {
+                    if (!r.success) { showError('Hata!', r.message || 'Bilinmeyen hata'); return; }
+                    $('#iletisimGecmisi').html(r.html);
+                    $('#igSonDurum').text(r.sonDurum || '—');
+                    igdModal.hide();
+                    showToast(r.message, 'success');
+                }, 'json').fail(function () { showError('Bağlantı Hatası', 'İletişim kaydı güncellenemedi'); })
+                  .always(function () { $b.prop('disabled', false).html(eski); });
+            });
+        }
 
         $('#basvuruForm').on('submit', function (e) {
             e.preventDefault();
